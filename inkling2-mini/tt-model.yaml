@@ -1,0 +1,244 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: Inkling-2-Mini on one Tenstorrent P150.
+# Release: https://huggingface.co/Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150 (tag batch16-pc-spec-20261123,
+# runtime image lottolabs/inkling2-mini-tt-p150:batch16-pc-spec).  Build from this directory:
+#   ../scripts/build_vllm_wheel.sh lottolabs/inkling2-mini-p150 wheels
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/inkling2-mini-tt-p150
+# Profiles mirror the release's launch.py modes (choose_config + kvplan.py of the runtime).
+schema: "5.1"
+
+repo: Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150-tt-model
+name: inkling2-mini-tt-p150
+
+# The release repo at the commit its tag names.  checkpoint/ is the upstream thinkingmachines/Inkling-2-Mini snapshot
+# the release was validated on; native/gptq/ is the GPTQ-BFP4 device package.  runtime-image.tar.gz, runtime/ and
+# evidence/ are not fetched.
+weights:
+  repo: Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150
+  revision: 4f2e2627e8faf6e22c392ecede5463e5db666c3e
+  allow_patterns:
+    - "checkpoint/*"
+    - "native/gptq/*"
+
+kind: vllm-plugin
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a (the release image's base, unchanged C++) + the moe routing / streaming expert
+  # files and models/demos/blackhole/inkling2 (Python + JIT kernels only).
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/inkling2-mini-p150
+  code:
+    - models/demos/blackhole/inkling2            # runtime, vLLM adapter, JIT kernels, kvplan, vllm_bundle/
+    - models/common                              # modules/moe/selected_experts.py (+ kernels/ the moe kernels include)
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py   # UnifiedKernelDescriptor (python)
+    - models/demos/deepseek_v3_b1/unified_kernels                # kernel_op_api.hpp & co (#included by inkling2 kernels)
+    - models/demos/deepseek_v3_b1/kernel_includes                # compute_kernel_api/*.h (#included)
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release image's python_env is 3.10.12)
+
+runtime:
+  # tenstorrent/vllm 03fa3af + the Qwen3.6 core overlays + the inkling2 serving patches + requirements pinned to the
+  # validated set (LottoLottoLotto/vllm lottolabs/inkling2-mini-p150), built by ../scripts/build_vllm_wheel.sh.
+  vllm: {wheel: wheels/vllm-*.whl}
+  plugin:
+    repo: https://github.com/LottoLottoLotto/tt-model-plugins
+    ref: lottolabs/inkling2-mini-p150
+  extra_models_dir: models/demos/blackhole/inkling2/vllm_bundle/models
+  # vLLM general plugin `inkling2_config` (config class for inkling2_loop, architecture, tokenizer mode "inkling2")
+  extension: models/demos/blackhole/inkling2/vllm_bundle/ext
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  block_size: 64
+  capabilities:
+    tool_parser: inkling2
+    reasoning_parser: inkling2
+  additional_config:
+    tt:
+      trace_mode: decode_only
+      sample_on_device_mode: decode_only
+      enable_model_warmup: true
+      l1_small_size: 24576
+      worker_l1_size: 1335424        # 192 KB L1 ring for the fused glue
+  env:
+    # Paths into the mounted HF cache (/hf = HF_HOME).  Pinning them also makes `tt-model serve` refuse to boot over
+    # an incomplete cache (the runtime opens these directly).
+    MODEL_WEIGHTS_DIR: /hf/hub/models--Lottolabs--Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150/snapshots/4f2e2627e8faf6e22c392ecede5463e5db666c3e/checkpoint
+    INK_VARIANT_ROOT: /hf/hub/models--Lottolabs--Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150/snapshots/4f2e2627e8faf6e22c392ecede5463e5db666c3e/native
+    INK_TENSOR_CACHE: /tensor-cache      # tt-model mounts ~/.cache/tt-model/<name>/tensors here
+    HF_HUB_OFFLINE: "1"                  # serve has put the pinned snapshot on the host already
+    TRANSFORMERS_OFFLINE: "1"
+    VLLM_TARGET_DEVICE: tt
+    TORCHDYNAMO_DISABLE: "1"
+    VLLM_TT_TOKS: "0"                    # toks prompt encoding is not shipped: HF tokenizer, same ids
+    INKLING2_DEVICE_DECODE: "1"
+    INKLING2_EMBED: auto
+    INKLING2_PREFIX_CACHING: "on"
+  # One FLAT list (anchored): each profile's `args: [*common_args, ...]` nests it one level, which tt-model flattens.
+  # vLLM is handed the repo id (positional, from `weights`); the loadable HF folder is checkpoint/ inside it.
+  args: &common_args
+    - --served-model-name
+    - thinkingmachines/Inkling-2-Mini
+    - --hf-config-path
+    - /hf/hub/models--Lottolabs--Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150/snapshots/4f2e2627e8faf6e22c392ecede5463e5db666c3e/checkpoint
+    - --tokenizer
+    - /hf/hub/models--Lottolabs--Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150/snapshots/4f2e2627e8faf6e22c392ecede5463e5db666c3e/checkpoint
+    - --generation-config
+    - /hf/hub/models--Lottolabs--Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150/snapshots/4f2e2627e8faf6e22c392ecede5463e5db666c3e/checkpoint
+    - --tokenizer-mode
+    - inkling2
+    - --hf-overrides
+    - '{"quantization_config": null}'
+    - --seed
+    - "9472"
+    - --exclude-tools-when-tool-choice-none
+    - --tool-parser-plugin
+    - /opt/tt-metal/models/demos/blackhole/inkling2/vllm_bundle/inkling2_parsers.py
+    - --reasoning-parser-plugin
+    - /opt/tt-metal/models/demos/blackhole/inkling2/vllm_bundle/inkling2_parsers.py
+
+serve_profiles:
+  - name: fast
+    description: >-
+      Up to 16 concurrent users, 65,536-token context, BF16 KV, shared 196,608-token KV pool, batched speculation
+      (auto), exact prefix caching.
+    max_model_len: 65536
+    max_num_seqs: 16
+    additional_config: {tt: {trace_region_size: 268435456}}
+    env:
+      INKLING2_SPEC: auto
+      INKLING2_MAX_TOKENS_ALL_USERS: "196608"
+      TT_PREFILL_CHUNK_ALIGN: "2048"
+      TT_DECODE_LOOKAHEAD: "16"
+    args: [*common_args, [--max-num-batched-tokens, "2048"], --enable-prefix-caching, --enable-chunked-prefill]
+  - name: long
+    description: Up to 16 users, 131,072-token context, BFP8 KV, 262,144-token shared pool, spec auto, prefix caching.
+    max_model_len: 131072
+    max_num_seqs: 16
+    additional_config: {tt: {trace_region_size: 268435456}}
+    env:
+      INKLING2_SPEC: auto
+      INKLING2_MAX_TOKENS_ALL_USERS: "262144"
+      TT_PREFILL_CHUNK_ALIGN: "2048"
+      TT_DECODE_LOOKAHEAD: "16"
+    args: [*common_args, [--max-num-batched-tokens, "2048"], --enable-prefix-caching, --enable-chunked-prefill]
+  - name: release-256k
+    description: >-
+      The release launcher's default: 16 users, 262,144-token context, K BFP8 / V BFP4 KV, 262,144-token pool,
+      spec auto, prefix caching (the configuration the release's speed tables were measured on).
+    max_model_len: 262144
+    max_num_seqs: 16
+    additional_config: {tt: {trace_region_size: 268435456}}
+    env:
+      INKLING2_SPEC: auto
+      INKLING2_MAX_TOKENS_ALL_USERS: "262144"
+      TT_PREFILL_CHUNK_ALIGN: "2048"
+      TT_DECODE_LOOKAHEAD: "16"
+    args: [*common_args, [--max-num-batched-tokens, "2048"], --enable-prefix-caching, --enable-chunked-prefill]
+  - name: native
+    description: One user, the model's native 1,048,576-token context (K BFP8 / V BFP4 KV), plain decoding.
+    max_model_len: 1048576
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 201326592}}
+    env:
+      INKLING2_SPEC: "off"
+    args: [*common_args, [--max-num-batched-tokens, "1048576"], --enable-prefix-caching, --no-enable-chunked-prefill]
+  - name: quality
+    description: >-
+      One user, 65,536 tokens, BFP8 experts + BFP8 attention (all-domain KL 0.0030 vs 0.0112 default; ~25% slower
+      decode).
+    max_model_len: 65536
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 201326592}}
+    env:
+      INKLING2_PRECISION: quality
+      INKLING2_SPEC: "off"
+    args: [*common_args, [--max-num-batched-tokens, "65536"], --no-enable-prefix-caching, --no-enable-chunked-prefill]
+default_profile: fast
+
+verify:
+  - "from models.demos.blackhole.inkling2.tt.kvplan import plan; p = plan(65536, max_num_seqs=16, kv_tokens=196608, env={'INKLING2_SPEC': 'auto', 'INKLING2_EMBED': 'auto', 'INKLING2_PREFIX_CACHING': 'on'}); assert p.trace_region == 268435456, p.trace_region"
+  - "from models.demos.blackhole.inkling2.tt.inkling2_vllm import Inkling2ForCausalLM as M; assert M.device_sampling_eligible and M.device_row_sampling"
+  - "import importlib.util as u; assert u.find_spec('models.demos.blackhole.qwen36') is None, 'qwen36 must not ship'; import vllm_tt_plugin.exact_sampling"
+  - "import inkling2_vllm_config, inkling2_encoding; from importlib.metadata import entry_points; assert any(e.name == 'inkling2_config' for e in entry_points(group='vllm.general_plugins'))"
+  - "import inspect, vllm_tt_plugin.model_runner as r, vllm_tt_plugin.prefix_resume; s = inspect.getsource(r); assert 'device_sampling_eligible' in s and 'device_row_sampling' in s, 'plugin lacks the inkling2 changes'"
+  - "import importlib.util as u; assert u.spec_from_file_location('p', '/opt/tt-metal/models/demos/blackhole/inkling2/vllm_bundle/inkling2_parsers.py')"
+  - "from pathlib import Path; assert Path('/opt/tt-metal/models/common/modules/moe/kernels/topk_routing.cpp').is_file()"
+  - "from pathlib import Path; assert Path('/opt/tt-metal/models/demos/deepseek_v3_b1/unified_kernels/kernel_op_api.hpp').is_file()"
+
+card:
+  attribution: >-
+    Derived from thinkingmachines/Inkling-2-Mini (Thinking Machines Lab, Apache-2.0): experts and attention q/gate
+    re-quantized to GPTQ BFP4 for Tenstorrent Blackhole, everything else as released.  A community package by
+    Lottolabs; not an official Thinking Machines Lab or Tenstorrent release.
+  description: >-
+    Inkling-2-Mini, a 26.4B-parameter (3.4B active) looped MoE language model — 24 layers of which 6-17 run three
+    times (48 layer applications per token), 128-expert top-8 MoE in every layer, sliding-window + full attention
+    without RoPE, native 1,048,576-token context — served text-only through vLLM's OpenAI API by a custom tt-metal
+    runtime with traced decode, batched decoding of up to 16 sequences, speculative decoding with the checkpoint's
+    own drafter, and exact prefix caching.  The weights are the release
+    [Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150)
+    (tag batch16-pc-spec-20261123); the source is
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/inkling2-mini-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/inkling2-mini-p150),
+    [vllm lottolabs/inkling2-mini-p150](https://github.com/LottoLottoLotto/vllm/tree/lottolabs/inkling2-mini-p150) and
+    [tt-model-plugins lottolabs/inkling2-mini-p150](https://github.com/LottoLottoLotto/tt-model-plugins/tree/lottolabs/inkling2-mini-p150).
+  intended_use: >-
+    Text chat, reasoning, tool calling and long-context work on one Tenstorrent P150, for one to sixteen concurrent
+    users.
+  prerequisites: |
+    - About 36 GB in the Hugging Face cache for `checkpoint/` and `native/gptq/`, plus about 10 GB for the kernel and
+      device tensor caches written on the first start (the first start takes about 10 minutes; later starts reuse them).
+  usage: |
+    Model name `thinkingmachines/Inkling-2-Mini`.  Images, audio and video are rejected with HTTP 400.  Reasoning is
+    returned in `reasoning`; set the thinking effort per request with `"reasoning_effort": "low"` or
+    `"chat_template_kwargs": {"reasoning_effort": 0.5}` (default 0.9).  Default sampling is the checkpoint's
+    generation_config (temperature 1.0); greedy and sampled decode steps sample on the device with vLLM's exact
+    semantics.  Pick a profile (`--profile long`, `native`, ...) rather than overriding `--max-model-len`: each
+    profile carries its own memory plan.
+  performance: |
+    Teacher-forced quality on the P150 against a CPU BF16 reference of the upstream model (18 records, 10,656 scored
+    positions; KL = mean KL(reference ‖ run)):
+
+    | eval | this package (fast / release-256k weights) | `quality` profile | BF16 noise floor | prompts |
+    | --- | --- | --- | --- | --- |
+    | KL, all domains | 0.0112 | 0.0030 | 0.00162 | 18 |
+    | Top-1 token agreement | 96.6% | 98.1% | 98.7% | 18 |
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | release-256k (spec auto) | 128 | 256 | 1 | 2 | 120 | 1,042 | 124.3 | — |
+    | release-256k (spec auto) | 128 | 256 | 4 | 2 | 480 | — | 64.1 | — |
+    | release-256k (spec auto) | 128 | 256 | 16 | 2 | 1,920 | — | 19.7 | — |
+    | native | 1,048,000 | 150 | 1 | 1 | 1,050,400 | 998 | 23.0 | — |
+
+    Measured end to end through the release image's OpenAI server (release batch16-pc-spec-20261123; native row: the
+    previous release image, one 1,048,576-token session with three pass keys, as published in the release README) with
+    streamed completions, greedy, ignore_eos; decode tok/s/u = aggregate / concurrency, mean of 2 waves.  This package
+    runs the same runtime: a greedy request served by it returns the same token ids as the release image.
+  limitations: |
+    - Text only; image, audio and video inputs are rejected.
+    - One P150 only (no tensor or data parallelism).
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1), not on the tt-metal of the current golden set.
+    - The default weights are GPTQ BFP4 (all-domain KL 0.0112 vs the BF16 reference); the `quality` profile is closer
+      (0.0030) and about 25% slower.
+    - Logprobs, logit bias, structured output and temperature > 8 sample on the host (slower).
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+  licensing: >-
+    Weights: the upstream Apache-2.0 licence (see the release repo's LICENSE).  The TTNN runtime and serving code in
+    `code/`, the vLLM fork and the plugin are Apache-2.0.
+  license:
+    id: apache-2.0
+  pipeline_tag: text-generation
+  base_model: [thinkingmachines/Inkling-2-Mini]
