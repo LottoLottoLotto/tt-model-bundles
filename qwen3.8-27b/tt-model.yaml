@@ -1,0 +1,493 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: Qwen3.8-27B on one Tenstorrent P150.
+# Release: https://huggingface.co/Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150 (s27v8-20261112, main commit
+# dd18ba3d), runtime image lottolabs/qwen27b-tt-p150:ctx5-s27v8 (8K and 128K profiles).  Build from this directory:
+#   ../scripts/build_vllm_wheel.sh lottolabs/qwen3.8-27b-p150 wheels
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/qwen3.8-27b-tt-p150
+# Profiles mirror the release's launch.py modes: each profile's env and vLLM arguments are what the release's
+# serve_native.py passes to the ctx5-s27v8 image for that launch.py invocation (paths moved into the HF cache).
+# The release's 262K profile runs on its other image (ctx6-kv4-s27v8, a different runtime tree) and is not offered.
+schema: "5.1"
+
+repo: Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150-tt-model
+name: qwen3.8-27b-tt-p150
+
+# The release repo at the commit its main branch names.  checkpoint/ is the TT-native checkpoint (with config,
+# tokenizer, processor, generation config and the reload proofs of the ctx5-s27v8 runtime), dflash-draft/ the bundled
+# z-lab/Qwen3.8-27B-DFlash2 drafter, vision/ the vision tower.  runtime-image.tar.gz, runtime/, evidence/ and
+# proofs-262k/ are not fetched.
+weights:
+  repo: Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150
+  revision: dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b
+  allow_patterns:
+    - "checkpoint/*"
+    - "dflash-draft/*"
+    - "vision/*"
+
+kind: vllm-plugin
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a (the release image's base) + the release runtime tree: the qwen36 model
+  # package (Python + JIT kernels), gated DeltaNet ops, and compiled C++ (ttnn matmul program factories,
+  # chunk_gated_delta_rule / gated_delta_attn, tt_metal global_circular_buffer) that tt-model builds from this tree.
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/qwen3.8-27b-p150
+  code:
+    - models/demos/blackhole/qwen36                  # runtime, vLLM adapter, vision tower, JIT kernels
+    - models/demos/blackhole/qwen38_27b_bundle       # vLLM model redirect (weights repo id -> checkpoint/)
+    - models/experimental/gated_attention_gated_deltanet
+    - models/common
+    - models/tt_transformers
+    - models/tt_dit                                  # utils.tensor
+    - models/demos/qwen3_vl                          # vision helpers
+    - models/demos/utils
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py
+    - models/demos/deepseek_v3_b1/unified_kernels    # kernel_op_api.hpp (#included by qwen36 kernels)
+    - models/demos/deepseek_v3_b1/kernel_includes
+    - native_checkpoint.py                           # native checkpoint loader + reload-proof check
+    - qwen-runtime-support.json                      # runtime source identity the reload proofs bind
+    - qwen-runtime-relocation.json                   # maps that identity to this install (QWEN36_RUNTIME_RELOCATION)
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release image's python_env is 3.10)
+
+runtime:
+  # tenstorrent/vllm 03fa3af + the Qwen3.6/3.8 P150 core overlays (speculative config, stop strings under
+  # speculation) + requirements pinned to the validated set (LottoLottoLotto/vllm lottolabs/qwen3.8-27b-p150),
+  # built by ../scripts/build_vllm_wheel.sh.
+  vllm: {wheel: wheels/vllm-*.whl}
+  plugin:
+    repo: https://github.com/LottoLottoLotto/tt-model-plugins
+    ref: lottolabs/qwen3.8-27b-p150
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  block_size: 64
+  capabilities:
+    tool_parser: qwen3_coder
+    reasoning_parser: qwen3
+  additional_config:
+    tt:
+      trace_mode: all
+      enable_model_warmup: true
+      l1_small_size: 24576
+      sample_on_device_mode: decode_only
+  env:
+    # The reload proof's execution environment (checkpoint/equivalence*.json "runtime_environment"; the runtime
+    # refuses to load the checkpoint under any other), the vision tower settings, and the weights paths in the
+    # mounted HF cache (/hf = HF_HOME).  Pinning the paths also makes `tt-model serve` refuse to boot over an
+    # incomplete cache.
+    ARCH_NAME: "blackhole"
+    HF_HUB_OFFLINE: "1"
+    HF_MODEL: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/checkpoint"
+    MESH_DEVICE: "P150"
+    MODEL_WEIGHTS_DIR: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/checkpoint"
+    QWEN36_BFP4_LM_HEAD: "1"
+    QWEN36_BFP4_MLP_DOWN: "1"
+    QWEN36_BFP4_WEIGHTS: "1"
+    QWEN36_EVAL_PRECISION: "{\"layers\":{\"0\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"1\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"10\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"11\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"12\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"13\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"14\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"15\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"16\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"17\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"18\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"19\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"2\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"20\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"21\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"22\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"23\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"24\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"25\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"26\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"27\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"28\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"29\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"3\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"30\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"31\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"32\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"33\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"34\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"35\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"36\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"37\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"38\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"39\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"4\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"40\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"41\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"42\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"43\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"44\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"45\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"46\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"47\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"48\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"49\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"5\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"50\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"51\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"52\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"53\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"54\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"55\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"56\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"57\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"58\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"59\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"6\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"60\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"61\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"62\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"63\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"7\":{\"attention\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"8\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"},\"9\":{\"gdn\":\"bfp8\",\"gdn_output\":\"bfp8\",\"mlp_down\":\"bfp4\",\"mlp_gate_up\":\"bfp4\"}},\"lm_head\":\"bfp8\"}"
+    QWEN36_FUSED_FINAL_RESIDUAL_NORM: "1"
+    QWEN36_FUSED_GATE_UP: "1"
+    QWEN36_FUSED_GATE_UP_CORES: "109"
+    QWEN36_FUSED_GATE_UP_PACKED: "1"
+    QWEN36_FUSED_QKV: "1"
+    QWEN36_GATEUP_CB_SLOTS: "2"
+    QWEN36_GATEUP_OUTSTANDING: "1"
+    QWEN36_GATEUP_REQUIRE_PACKED: "1"
+    QWEN36_GENERIC_BASELINE: "0"
+    QWEN36_IN0_MCAST_CHUNK_TILES: "32"
+    QWEN36_LM_HEAD_CB_SLOTS: "2"
+    QWEN36_LM_HEAD_OUTSTANDING: "1"
+    QWEN36_LM_HEAD_PACKED: "1"
+    QWEN36_LM_HEAD_REQUIRE_PACKED: "1"
+    QWEN36_MLP_DOWN_CB_SLOTS: "3"
+    QWEN36_MLP_DOWN_DUAL_NOC: "1"
+    QWEN36_MLP_DOWN_OUTSTANDING: "1"
+    QWEN36_MLP_DOWN_PACKED: "1"
+    QWEN36_MLP_DOWN_REQUIRE_PACKED: "1"
+    QWEN36_OPTIMIZED_27B: "1"
+    QWEN36_PROJ_O_ROTATING_COLS: "2"
+    QWEN36_RUNTIME_RELOCATION: "/opt/tt-metal/qwen-runtime-relocation.json"
+    QWEN36_SHARDED_FINAL_NORM: "1"
+    QWEN36_SINGLE_1D_DECODE: "1"
+    QWEN36_VISION: "1"
+    QWEN36_VISION_HIFI: "1"
+    QWEN36_VISION_L1_LEAN: "1"
+    QWEN36_VISION_PRECISION: "bfp8"
+    QWEN36_VISION_WEIGHTS: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/vision"
+    QWEN36_WEIGHT_PREFETCH: "proj_o"
+    QWEN_GDN_FP32_STATE: "0"
+    QWEN_GDN_FRONTEND_FUSED: "1"
+    QWEN_GDN_MEGA_CB_SLOTS: "2"
+    QWEN_GDN_MEGA_CORES: "86"
+    QWEN_GDN_MEGA_OUTSTANDING: "1"
+    QWEN_GDN_MEGA_PACKED: "1"
+    QWEN_GDN_MEGA_REQUIRE_PACKED: "1"
+    QWEN_GDN_OUTPUT_FUSED: "1"
+    QWEN_GDN_RECURRENT_FUSED: "1"
+    QWEN_SDPA_BF8: "0"
+    TORCHDYNAMO_DISABLE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    TT_DECODE_BUCKETING: "1"
+    TT_QWEN35_TEXT_VER: "qwen36_blackhole"
+    VLLM_MODEL_REDIRECT_PATH: "/opt/tt-metal/models/demos/blackhole/qwen38_27b_bundle/vllm-model-redirect.json"
+    VLLM_TARGET_DEVICE: "tt"
+  # One FLAT list (anchored): each profile's `args: [*common_args, ...]` nests it one level, which tt-model flattens.
+  # vLLM is handed the repo id (positional, from `weights`); VLLM_MODEL_REDIRECT_PATH maps it to checkpoint/.
+  args: &common_args
+    - --served-model-name
+    - Qwen/Qwen3.8-27B
+    - --seed
+    - "9472"
+
+serve_profiles:
+  - name: 8k
+    description: >-
+      The release default (launch.py with no options): one user, 8,192-token context, BF16 KV, DFlash2 block-8 speculative decoding with the bundled drafter, images and videos, exact prefix caching.
+    max_model_len: 8192
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "1"
+      QWEN36_DFLASH_BLOCK_SIZE: "8"
+      QWEN36_DFLASH_MODEL: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft"
+      QWEN36_MAX_TOKENS_ALL_USERS: "8192"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/dflash"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+      - "--no-enable-chunked-prefill"
+      - ["--speculative-config", "{\"method\": \"dflash\", \"model\": \"/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft\", \"num_speculative_tokens\": 7}"]
+  - name: 8k-mtp
+    description: >-
+      One user, 8,192 tokens, MTP-1 speculation instead of DFlash2 (launch.py --spec mtp).
+    max_model_len: 8192
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_MAX_TOKENS_ALL_USERS: "8192"
+      QWEN36_MTP: "1"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/mtp1"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+      - ["--speculative-config", "{\"method\": \"mtp\", \"num_speculative_tokens\": 1}"]
+  - name: 8k-off
+    description: >-
+      One user, 8,192 tokens, the verified non-speculative path (launch.py --spec off).
+    max_model_len: 8192
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_MAX_TOKENS_ALL_USERS: "8192"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/off"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+  - name: 8k-noprefix
+    description: >-
+      The default profile with prefix caching off (launch.py --prefix-caching off).
+    max_model_len: 8192
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "1"
+      QWEN36_DFLASH_BLOCK_SIZE: "8"
+      QWEN36_DFLASH_MODEL: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft"
+      QWEN36_MAX_TOKENS_ALL_USERS: "8192"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/dflash"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--no-enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+      - "--no-enable-chunked-prefill"
+      - ["--speculative-config", "{\"method\": \"dflash\", \"model\": \"/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft\", \"num_speculative_tokens\": 7}"]
+  - name: 8k-users4
+    description: >-
+      Up to 4 concurrent users, 8,192 tokens each, BF16 KV (32,768-token pool), DFlash2 shared verify rounds for greedy and device-sampled requests (launch.py --users 4).
+    max_model_len: 8192
+    max_num_seqs: 4
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "1"
+      QWEN36_DFLASH_BLOCK_SIZE: "8"
+      QWEN36_DFLASH_MODEL: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft"
+      QWEN36_MAX_TOKENS_ALL_USERS: "32768"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/dflash"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+      - ["--speculative-config", "{\"method\": \"dflash\", \"model\": \"/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft\", \"num_speculative_tokens\": 7}"]
+  - name: 8k-users8
+    description: >-
+      Up to 8 concurrent users, 8,192 tokens each, BFP8 KV (65,536-token pool), DFlash2 shared verify rounds (launch.py --users 8).
+    max_model_len: 8192
+    max_num_seqs: 8
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "1"
+      QWEN36_DFLASH_BLOCK_SIZE: "8"
+      QWEN36_DFLASH_MODEL: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "65536"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/dflash"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+      - ["--speculative-config", "{\"method\": \"dflash\", \"model\": \"/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft\", \"num_speculative_tokens\": 7}"]
+  - name: 8k-users16
+    description: >-
+      Up to 16 concurrent users, 8,192 tokens each, BFP8 KV (131,072-token pool), non-speculative (launch.py --users 16).
+    max_model_len: 8192
+    max_num_seqs: 16
+    additional_config: {tt: {trace_region_size: 1073741824}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      TT_CACHE_PATH: "/tensor-cache/off"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "16384"]
+      - "--enable-prefix-caching"
+      - ["--mm-processor-kwargs", "{\"max_pixels\": 8388608, \"size\": {\"shortest_edge\": 65536, \"longest_edge\": 8388608}}"]
+  - name: 128k
+    description: >-
+      One user, 131,072-token context, BFP8 KV, DFlash2 block-8 speculation (launch.py --max-model-len 131072).
+    max_model_len: 131072
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 0}}
+    env:
+      QWEN36_DFLASH: "1"
+      QWEN36_DFLASH_BLOCK_SIZE: "8"
+      QWEN36_DFLASH_MODEL: "/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      QWEN36_PREFILL_BUCKET_TRACE: "0"
+      TT_CACHE_PATH: "/tensor-cache/dflash"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "131072"]
+      - "--enable-prefix-caching"
+      - "--no-enable-chunked-prefill"
+      - ["--speculative-config", "{\"method\": \"dflash\", \"model\": \"/hf/hub/models--Lottolabs--Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150/snapshots/dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/dflash-draft\", \"num_speculative_tokens\": 7}"]
+  - name: 128k-mtp
+    description: >-
+      One user, 131,072 tokens, BFP8 KV, MTP-1 speculation (launch.py --max-model-len 131072 --spec mtp).
+    max_model_len: 131072
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 0}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "1"
+      QWEN36_MTP_DEPTH: "1"
+      QWEN36_PREFILL_BUCKET_TRACE: "0"
+      TT_CACHE_PATH: "/tensor-cache/mtp1"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "131072"]
+      - "--enable-prefix-caching"
+      - ["--speculative-config", "{\"method\": \"mtp\", \"num_speculative_tokens\": 1}"]
+  - name: 128k-off
+    description: >-
+      One user, 131,072 tokens, BFP8 KV, non-speculative (launch.py --max-model-len 131072 --spec off).
+    max_model_len: 131072
+    max_num_seqs: 1
+    additional_config: {tt: {trace_region_size: 0}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      QWEN36_PREFILL_BUCKET_TRACE: "0"
+      TT_CACHE_PATH: "/tensor-cache/off"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "131072"]
+      - "--enable-prefix-caching"
+  - name: 128k-users4
+    description: >-
+      Up to 4 users sharing a 131,072-token BFP8 KV pool, 131,072 tokens each, non-speculative (launch.py --max-model-len 131072 --users 4).
+    max_model_len: 131072
+    max_num_seqs: 4
+    additional_config: {tt: {trace_region_size: 0}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      QWEN36_PREFILL_BUCKET_TRACE: "0"
+      TT_CACHE_PATH: "/tensor-cache/off"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "131072"]
+      - "--enable-prefix-caching"
+  - name: 128k-users8
+    description: >-
+      Up to 8 users sharing a 131,072-token BFP8 KV pool, non-speculative (launch.py --max-model-len 131072 --users 8).
+    max_model_len: 131072
+    max_num_seqs: 8
+    additional_config: {tt: {trace_region_size: 0}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      QWEN36_PREFILL_BUCKET_TRACE: "0"
+      TT_CACHE_PATH: "/tensor-cache/off"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "131072"]
+      - "--enable-prefix-caching"
+  - name: 128k-users16
+    description: >-
+      Up to 16 users sharing a 131,072-token BFP8 KV pool, non-speculative (launch.py --max-model-len 131072 --users 16).
+    max_model_len: 131072
+    max_num_seqs: 16
+    additional_config: {tt: {trace_region_size: 0}}
+    env:
+      QWEN36_DFLASH: "0"
+      QWEN36_KV_CACHE_DTYPE: "bfp8"
+      QWEN36_MAX_TOKENS_ALL_USERS: "131072"
+      QWEN36_MTP: "0"
+      QWEN36_MTP_DEPTH: "1"
+      QWEN36_PREFILL_BUCKET_TRACE: "0"
+      TT_CACHE_PATH: "/tensor-cache/off"
+    args:
+      - *common_args
+      - ["--max-num-batched-tokens", "131072"]
+      - "--enable-prefix-caching"
+default_profile: 8k
+
+verify:
+  - "import ttnn; assert hasattr(ttnn.transformer, 'verify_two_gated_delta_rule') and hasattr(ttnn.transformer, 'chunk_gated_delta_rule'), 'ttnn was not built from the release tree (GDN ops missing)'"
+  - "import json, native_checkpoint as n; from pathlib import Path; r = json.load(open('/opt/tt-metal/qwen-runtime-relocation.json')); s = json.load(open('/opt/tt-metal/qwen-runtime-support.json')); bad = [k for k, v in s.items() if n.relocated_digest(k, v, r) is not None and n.digest(n.relocated_path(k, r, Path('/opt/tt-metal'))) != n.relocated_digest(k, v, r)]; assert not bad, bad; print(len(s), 'runtime sources match the release digests')"
+  - "import json; r = json.load(open('/opt/tt-metal/models/demos/blackhole/qwen38_27b_bundle/vllm-model-redirect.json')); assert r['Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150'].endswith('dd18ba3d25e5df0992ea52f3efcbf7d7a73b5d9b/checkpoint')"
+  - "import vllm_tt_plugin.prefix_resume, vllm.config.speculative as s, inspect; assert 'dflash' in inspect.getsource(s)"
+  - "import torchvision, cv2; assert torchvision.__version__.split('+')[0] == '0.26.0', torchvision.__version__"
+  - "from models.demos.blackhole.qwen36.tt import qwen36_vllm, model; import models.demos.blackhole.qwen36.tt.vision"
+
+card:
+  attribution: >-
+    Derived from Qwen/Qwen3.8-27B (Qwen team, Apache-2.0; revision 1d4bf0f2): MLP matrices GPTQ-quantized to BFP4 and
+    the rest of the linear layers in BFP8 for Tenstorrent Blackhole, as published in the Lottolabs release.  The
+    bundled DFlash2 drafter is z-lab/Qwen3.8-27B-DFlash2 (Apache-2.0, byte-identical).  A community package by
+    Lottolabs; not an official Qwen, z-lab or Tenstorrent release.
+  description: >-
+    Qwen3.8-27B, a 27B-parameter hybrid Gated DeltaNet / gated-attention model with image and video input, served
+    through vLLM's OpenAI API by a custom tt-metal runtime on one P150: traced decode with fused GDN kernels, DFlash2
+    block-8 speculative decoding with the bundled drafter (or MTP), on-device exact sampling, exact prefix caching,
+    up to 16 users per decode step (4 or 8 with DFlash2 shared verify rounds) and a BFP8 vision tower.  The weights
+    are the release
+    [Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150)
+    (s27v8-20261112, commit dd18ba3d); the source is
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/qwen3.8-27b-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/qwen3.8-27b-p150),
+    [vllm lottolabs/qwen3.8-27b-p150](https://github.com/LottoLottoLotto/vllm/tree/lottolabs/qwen3.8-27b-p150) and
+    [tt-model-plugins lottolabs/qwen3.8-27b-p150](https://github.com/LottoLottoLotto/tt-model-plugins/tree/lottolabs/qwen3.8-27b-p150).
+    This package carries the runtime of the release's 8K and 128K profiles (image lottolabs/qwen27b-tt-p150:ctx5-s27v8).
+  intended_use: >-
+    Chat, reasoning, coding, tool calling and image / video understanding on one Tenstorrent P150, for one user at
+    up to 131,072 tokens of context or up to 16 concurrent users.
+  prerequisites: |
+    - About 27 GB in the Hugging Face cache for `checkpoint/`, `dflash-draft/` and `vision/`, plus about 23 GB of
+      converted-tensor cache per decoding mode (DFlash2, MTP, non-speculative) written on the first start of that
+      mode (several minutes; later starts reuse it), plus the JIT kernel cache.
+  usage: |
+    Model name `Qwen/Qwen3.8-27B`.  The default profile `8k` is the release's default launch (one user, 8,192 tokens,
+    DFlash2).  Pick another profile with `--profile` (`128k`, `8k-users4`, `8k-users16`, `8k-off`, ...) rather than
+    overriding `--max-model-len` or `--max-num-seqs`: each profile carries the memory plan and the reload-proof
+    environment of its launch.py mode, and the runtime refuses an environment its proofs do not cover.  Reasoning is
+    returned in `reasoning_content` (`"chat_template_kwargs": {"enable_thinking": false}` turns it off); tool calls
+    use the qwen3_coder format.  Images and videos go into chat messages as in the OpenAI API, any number per
+    request (data URLs or links the container can fetch); on the 8K profiles one image is resized to at most
+    8,388,608 pixels so it fits the context.
+  performance: |
+    Release-measured on its ctx5-s27v8 image (this package runs the same runtime tree; its greedy tokens equal the
+    release image's, see the verification in the source repository).  Single user: 512 streamed output tokens, chat
+    prompts, greedy, p50 of 3 requests (release README "Speed"; TTFT from its cold-prompt figures).  Multi-user:
+    greedy requests of 256 tokens all starting together, median of 3 runs, per-user decode tok/s including prefill
+    (release README, s27v7/s27v8 HTTP benches; greedy is unchanged in s27v8).
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | 8k (DFlash2) | 128 | 512 | 1 | 3 | ~200 | — | 50.1 | — |
+    | 8k (DFlash2) | 2,048 | 512 | 1 | 3 | ~1,700 | ~1,200 | 54.5 | — |
+    | 128k (DFlash2) | 128 | 512 | 1 | 3 | — | — | 49.0 | — |
+    | 128k (DFlash2) | 2,048 | 512 | 1 | 3 | — | — | 49.8 | — |
+    | 128k (DFlash2) | 32,768 | 512 | 1 | 3 | ~31,000 | ~1,060 | 47.2 | — |
+    | 8k-off | 128 / 2,048 | 512 | 1 | 3 | — | — | 20.2 / 20.0 | — |
+    | 8k-users4 (chat) | chat | 256 | 4 | 3 | — | — | 25.7 | — |
+    | 8k-users8 (chat) | chat | 256 | 8 | 3 | — | — | 16.3 | — |
+    | 8k-users16 (chat) | chat | 256 | 16 | 3 | — | — | 12.6 | — |
+    Quality of the checkpoint (teacher-forced on the P150, 34 records, 42,129 scored positions; release README):
+    KL / top-1 against the TT all-BFP8 build 0.055 / 0.925 overall; against a CPU BF16 reference, code +4.25% Δppl /
+    0.931 top-1, instruct −0.09% / 0.960.  Greedy speculative output (DFlash2, MTP) is token-identical to
+    non-speculative output of the same profile.
+  limitations: |
+    - One P150.  Up to 16 users per decode step; speculation with one user, or with 4 or 8 users on the 8K profiles.
+    - The release's native 262,144-token profile is not in this package: it runs on the release's other image
+      (ctx6-kv4-s27v8, whose runtime adds the 4-bit V cache), and one package carries one runtime tree.  Use the
+      release's launch.py for 262K.  This package serves up to 131,072 tokens.
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1), not on the tt-metal of the current golden set.
+    - The runtime checks the checkpoint's reload proofs, which bind the release image's source and library digests:
+      this package's sources match them byte for byte except two files changed by path/licence cleanups, and its TTNN
+      libraries are compiled from the same sources (listed in `qwen-runtime-relocation.json`).
+    - With speculation on, `min_p`, `logit_bias` and `min_tokens` are rejected with HTTP 400 (upstream vLLM); use the
+      `8k-off` / `128k-off` profiles for them.  Logprobs, grammars and other host-sampler features run one token
+      per step on the host sampler.
+    - Prefix caching resumes only at 2,048-token chunk boundaries.  Cold long prompts have a long time to first
+      token (about 3 min at 128K).
+    - Image and video input is always on; there is no text-only profile (the release's `--vision off`).
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+  licensing: >-
+    Weights: Apache-2.0 (Qwen/Qwen3.8-27B; see the release repo's LICENSE), the DFlash2 drafter Apache-2.0
+    (z-lab/Qwen3.8-27B-DFlash2).  The TTNN runtime and serving code in `code/`, the vLLM fork and the plugin are
+    Apache-2.0.
+  license:
+    id: apache-2.0
+  pipeline_tag: image-text-to-text
+  base_model: [Qwen/Qwen3.8-27B]
