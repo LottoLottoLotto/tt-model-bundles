@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: Qwen3.8-Flash-Next Coder (IQ1_M) on one Tenstorrent P150, served by Strata's
+# own OpenAI/Anthropic-compatible server and its P150 engine (fnx: ttnn + custom Tensix kernels).
+# Release: https://huggingface.co/Lottolabs/Qwen3.8-Flash-Next-Coder-P150 (commit 69e738b2, the P150 expert set),
+# runtime = Strata's tt backend (github LottoLottoLotto/Strata tt-p150) in the engine image
+# lottolabs/qwen36-35b-tt-p150:single-x4.  Build from this directory:
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/qwen3.8-flash-next-coder-tt-p150 --private
+# Profiles mirror the release's configuration: setup.py --backend tt's Coder run config (MTP speculative decoding,
+# the default) and the same engine with --spec 1 (plain decoding, no MTP download).
+schema: "5.1"
+
+repo: Lottolabs/Qwen3.8-Flash-Next-Coder-P150-tt-model
+name: qwen3.8-flash-next-coder-tt-p150
+
+# The release repo at its pinned commit (Strata's tt/artifacts.json pins the same): the GPTQ-BFP4 routed experts +
+# placement plan (quant/) and the MTP drafter's BFP4 experts + routing profile (mtp/).  quant-iq3s/ (the full model's
+# IQ3_S card residents, another GGUF) is not fetched.
+weights:
+  repo: Lottolabs/Qwen3.8-Flash-Next-Coder-P150
+  revision: 69e738b2c8602ca93097ba0261a7649e4e71df04
+  allow_patterns:
+    - "quant/*"
+    - "mtp/*"
+    - "LICENSE"
+    - "README.md"
+
+# The GGUF the expert set was made from (attention, embeddings, PLE table, LM head, tokenizer), at the revision Strata
+# pins.  tt-model's serve-time prefetch fetches the whole repo (59.3 GB: IQ1_M/ + 0.9 GB vision encoder, unused).
+auxiliary_weights:
+  - repo: ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF
+    revision: 5348543e0147355ac9cbcb031184a3546350988e
+    allow_patterns:
+      - "IQ1_M/*"
+
+kind: http-server
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a + the Qwen3.6 P150 runtime tree of the release's engine image (qwen36
+  # package, Gated DeltaNet / matmul ttnn ops incl. compiled C++: the engine calls the fused recurrent GDN prim).
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/qwen3.8-flash-next-coder-p150
+  code:
+    - models/demos/blackhole/qwen36                              # Gated DeltaNet native frontend + kernels
+    - models/experimental/gated_attention_gated_deltanet         # its recurrence wrappers
+    - models/common                                              # imported by the qwen36 GDN modules
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py   # UnifiedKernelDescriptor (python)
+    - models/demos/deepseek_v3_b1/unified_kernels                # kernel_op_api.hpp & co (#included)
+    - models/demos/deepseek_v3_b1/kernel_includes                # compute_kernel_api/*.h (#included)
+  extra_code:
+    # Strata (MIT) at the release's tt backend + the bundle launcher (tt/bundle) and the fnx_cpu package
+    - root:
+        repo: https://github.com/LottoLottoLotto/Strata
+        ref: lottolabs/qwen3.8-flash-next-coder-p150
+      paths: [tt, serve, tools]
+    # llama.cpp's gguf-py at the commit Strata pins (third_party/ggml/VERSION.txt): the MTP packer's Q2_0 writer,
+    # as setup.py uses it (STRATA_GGUF_PY); the engine itself keeps the image's gguf 0.19.0
+    - root:
+        repo: https://github.com/ggml-org/llama.cpp
+        ref: 3cf03257f219afbe7334045ff7c6a06ac68c627d
+      paths: [gguf-py]
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release engine image's python_env is 3.10.12)
+
+runtime:
+  # the entrypoint runs commands in $HOME/work, so the launcher is named by its absolute path in the image (a bash -c
+  # snippet: the profile's args arrive as "$@")
+  command: [bash, -c, 'exec python /opt/tt-metal/tt/bundle/serve.py --host {host} --port {port} "$@"', strata-tt]
+  ready_line: "ready: http://"
+  # the release engine image's versions (python_env of lottolabs/qwen36-35b-tt-p150:single-x4) for what the engine and
+  # the server import; regex as Strata's requirements.txt pins it for the server's tokenizer.  torch is tt-metal's pin.
+  packages:
+    - numpy==1.26.4
+    - gguf==0.19.0
+    - Jinja2==3.1.6
+    - MarkupSafe==3.0.3
+    - regex==2026.9.10
+    - PyYAML==6.0.3
+    - psutil==7.2.2
+    - pillow==12.3.0
+    - jsonschema==4.26.0
+    - referencing==0.37.0
+    # Strata's CPU kernels as a wheel, built from the same Strata branch commit (tt/cpu_experts/pyproject.toml)
+    - "fnx-cpu @ git+https://github.com/LottoLottoLotto/Strata@da3fbdd7b60939307896537d6935fea682b496f6#subdirectory=tt/cpu_experts"
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  env:
+    # Paths into the mounted HF cache (/hf = HF_HOME); pinning the expert set's path also makes `tt-model serve`
+    # refuse to boot over an incomplete cache.
+    FNX_P150_DIR: /hf/hub/models--Lottolabs--Qwen3.8-Flash-Next-Coder-P150/snapshots/69e738b2c8602ca93097ba0261a7649e4e71df04
+    STRATA_GGUF: /hf/hub/models--ISTA-DASLab--Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF/snapshots/5348543e0147355ac9cbcb031184a3546350988e/IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf
+    FNX_DATA: /tensor-cache/fnx          # tokenizer, MTP draft layer, converted-tensor caches (~45 GB after a start)
+    HF_HUB_OFFLINE: "1"
+
+serve_profiles:
+  - name: mtp
+    description: >-
+      The release's configuration (setup.py --backend tt, Coder IQ1_M): 32,768-token context, one request at a time,
+      MTP speculative decoding (4-token windows, drafts stop below p 0.5; output identical to plain decoding).
+    args: [--mtp]
+  - name: plain
+    description: >-
+      The same engine without the drafter (--spec 1): no MTP download from the Qwen checkpoint, slower decode,
+      the same tokens.
+    args: [--no-mtp]
+default_profile: mtp
+
+verify:
+  - "import ctypes, fnx_cpu; ctypes.CDLL(str(fnx_cpu.LIB)); assert fnx_cpu.CMAKELISTS.is_file() and (fnx_cpu.DATA / 'draft_vocab.bin').is_file() and (fnx_cpu.DATA / 'expert-profile-coder.bin').is_file()"
+  - "import ttnn; assert hasattr(ttnn.transformer, 'verify_two_gated_delta_rule'), 'ttnn lacks the Qwen3.6 GDN ops (compiled C++ of the tt-metal branch)'"
+  - "from models.demos.blackhole.qwen36.tt.gdn.native_frontend import native_frontend, allocate_native_frontend"
+  - "import os, sys; os.environ['FNX_DATA'] = '/tmp/fnx-verify'; sys.path.insert(0, '/opt/tt-metal/tt'); import fnx.serve_engine, fnx.tt.model, fnx.tt.mtp, fnx.tt.gdn"
+  - "import sys; sys.path[:0] = ['/opt/tt-metal', '/opt/tt-metal/tools', '/opt/tt-metal/tt/serve']; import serve.server, tt_telemetry, strata_tokenizer, gguf_reader"
+  - "import sys; sys.path.insert(0, '/opt/tt-metal/gguf-py'); import gguf; assert gguf.GGMLQuantizationType.Q2_0.value == 42, gguf.__file__"
+  - "import subprocess; subprocess.run(['bash', '-n', '/opt/tt-metal/tt/bundle/engine.sh'], check=True); import runpy, sys; sys.argv = ['serve.py', '--help']; runpy.run_path('/opt/tt-metal/tt/bundle/serve.py', run_name='__main__')"
+
+card:
+  attribution: >-
+    Derived from Qwen/Qwen3.8-Flash-Next (Qwen, Qwen Community License 1.0) through ISTA-DASLab's
+    Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF (Apache-2.0: GSQ-RCO expert pruning to 256 of 512 experts, IQ1_M); the
+    routed experts re-quantized to GPTQ BFP4 for Tenstorrent Blackhole by Lottolabs.  Served by
+    [Strata](https://github.com/Niko1221/Strata) (MIT) and its Tenstorrent P150 backend.  A community package by
+    Lottolabs; not an official Qwen, IST Austria, Strata or Tenstorrent release.
+  description: >-
+    Qwen3.8-Flash-Next Coder: a 256-expert MoE language model for coding (Gated DeltaNet + sparse QSA attention,
+    hyper-connections, per-layer embeddings, an MTP draft layer) at IQ1_M, running on one P150 through Strata's
+    `tt` backend — every dense part on the card with decode steps captured as device traces, the routed experts as
+    GPTQ BFP4 rows (8,680 of 12,288 resident in the card's DRAM, the rest read from pinned host memory over PCIe inside
+    the trace), and MTP speculative decoding whose output equals plain decoding.  The server is Strata's own
+    (OpenAI- and Anthropic-compatible API, web chat, conversation reuse, streaming).  Weights: the P150 expert set
+    [Lottolabs/Qwen3.8-Flash-Next-Coder-P150](https://huggingface.co/Lottolabs/Qwen3.8-Flash-Next-Coder-P150)
+    (commit 69e738b2) and the GGUF
+    [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
+    IQ1_M (commit 5348543e); the MTP layer's tensors come from
+    [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) at the first start.  Source:
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/qwen3.8-flash-next-coder-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/qwen3.8-flash-next-coder-p150),
+    [Strata lottolabs/qwen3.8-flash-next-coder-p150](https://github.com/LottoLottoLotto/Strata/tree/lottolabs/qwen3.8-flash-next-coder-p150)
+    (the engine, the server and this package's launcher `tt/bundle/`).  No vLLM and no vLLM plugin are involved.
+  intended_use: >-
+    Coding assistance, chat and tool use for one user at a time on one Tenstorrent P150, through an OpenAI- or
+    Anthropic-compatible client or Strata's web chat.
+  prerequisites: |
+    - About 95 GB in the Hugging Face cache (the GGUF repo 59.3 GB, the P150 expert set 35.4 GB) and about 50 GB more
+      for the caches the first start writes (tokenizer, MTP draft layer, dequantized weights, converted tensors,
+      kernels).  The first start takes a long while (the MTP download and the caches); later starts reuse them.
+    - The `mtp` profile downloads the MTP layer's 31 tensors (~5 GB, HTTP range requests, SHA-256 checked) from
+      Qwen/Qwen3.8-Flash-Next at its first start: the container needs to reach huggingface.co (or `HF_ENDPOINT`).
+      The `plain` profile needs no download.
+    - About 14 GB of host RAM stays pinned while the model is loaded (host-resident experts); 32 GB or more of RAM.
+    - An x86-64 CPU with AVX2 (Strata's CPU kernels are built for the AVX2 baseline, AVX-512 picked at run time).
+  usage: |
+    The server is Strata's: OpenAI chat at `/v1/chat/completions` (and `/v1/completions`, `/v1/responses`), Anthropic
+    messages at `/v1/messages`, model list at `/v1/models`, a web chat at `/`.  Model name
+    `qwen3.8-flash-next-coder-iq1_m`.  Streaming, tool calls and reasoning (`reasoning_content`) follow Strata's
+    server; a request without `temperature` uses Strata's sampling defaults, `"temperature": 0` decodes greedily on the
+    card.  One request runs at a time (later ones queue).  The model unloads after 15 idle minutes and the next
+    request loads it again (about a minute and a half once the caches exist).
+  performance: |
+    Release measurements (docs/TT_P150.md of the release's Strata tree; `tt/fnx/tests/test_trace.py bench`, traced
+    decode, greedy, the golden chat / code / doc prompts, 2026-10-08): decode 46.9 / 50.9 / 50.0 tok/s with MTP,
+    30.9 / 29.2 / 26.6 tok/s plain.  Quality against a float32 reference of the published GGUF: perplexity +0.09%,
+    top-1 agreement 0.937, mean KL 0.038, GSM8K-50 45/50 (Strata's CUDA engine: 44/50).
+
+    Measured with the release runtime on this host (2026-11-23; first greedy chat request after a cold start, the
+    engine's own prompt / decode timings; not yet re-measured on the package image):
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | mtp | 72 | 194 | 1 | 1 | 773 | 93 | 41.1 | 5.5 |
+  limitations: |
+    - The Coder IQ1_M only.  The release's full-model IQ3_S configuration (quant-iq3s/ + the 84 GB
+      ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF, CPU experts) is not in this package.
+    - Text only (no images); context up to 32,768 tokens; one request at a time.
+    - One P150 only.
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1) plus the Qwen3.6 P150 runtime tree, not on the tt-metal of
+      the current golden set.
+    - Not vLLM: the API is Strata's server (OpenAI/Anthropic-compatible, but tt-model labels http-server packages
+      `openai_compatible: false`); sampling parameters and response fields follow Strata, not vLLM.
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+    - The `mtp` profile's first start needs network access to the Qwen checkpoint (see Prerequisites).
+  licensing: >-
+    Weights: Qwen Community License 1.0 (the release repo's LICENSE, copied from Qwen/Qwen3.8-Flash-Next).  Its
+    condition 2 applies to every user: a licensee (or affiliate) running a Model-as-a-Service or AI Work Assistant
+    business (e.g. an AI coding product) needs a separate license from Qwen before using the weights or derivatives
+    for any commercial purpose; condition 1 asks large products to display the model name.  The GGUF the experts were
+    made from is ISTA-DASLab's (Apache-2.0).  Code: Strata and its P150 backend MIT (new bundle files Apache-2.0),
+    the tt-metal tree Apache-2.0, llama.cpp's gguf-py MIT.
+  license:
+    id: other
+    name: Qwen Community License 1.0
+    link: https://huggingface.co/Lottolabs/Qwen3.8-Flash-Next-Coder-P150/blob/69e738b2c8602ca93097ba0261a7649e4e71df04/LICENSE
+  pipeline_tag: text-generation
+  base_model: [Qwen/Qwen3.8-Flash-Next]
