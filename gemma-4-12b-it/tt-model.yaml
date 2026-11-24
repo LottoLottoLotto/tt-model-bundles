@@ -1,0 +1,233 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: Gemma 4 12B IT (TT-native all-BFP8) on one Tenstorrent P150.
+# Release: https://huggingface.co/Lottolabs/gemma-4-12B-it-TT-BFP8-P150 (commit 906ccca6, runtime image
+# lottolabs/gemma4-12b-tt-p150:p3d-pc-gate-s1).  Build from this directory:
+#   ../scripts/build_vllm_wheel.sh lottolabs/gemma-4-12b-it-p150 wheels
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/gemma-4-12b-it-tt-p150
+# Profiles mirror the release launcher's modes (launch.py --speculation on|off, --prefix-caching on|off;
+# serve_native.py composes the vLLM command).
+schema: "5.1"
+
+repo: Lottolabs/gemma-4-12B-it-TT-BFP8-P150-tt-model
+name: gemma-4-12b-it-tt-p150
+
+# The release repo at its current main commit.  gemma-4-12B-it/ is the native BFP8 checkpoint (manifest, proof,
+# config/tokenizer, TTNN tensor files) and gemma-4-12B-it-assistant/ the speculative drafter (its own manifest and
+# proof).  runtime-image.tar.gz, runtime/, evidence/ and the launcher scripts are not fetched.
+weights:
+  repo: Lottolabs/gemma-4-12B-it-TT-BFP8-P150
+  revision: 906ccca68049aadc8984929d37096203df7a1f7d
+  allow_patterns:
+    - "gemma-4-12B-it/*"
+    - "gemma-4-12B-it-assistant/*"
+
+kind: vllm-plugin
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a (the release image's base) + the release's TTNN 1D-matmul overlay (compiled
+  # C++ host factory + 2 data-movement kernels), its models/demos/gemma4 tree and the checkpoint loader tools.
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/gemma-4-12b-it-p150
+  code:
+    - models/demos/gemma4                    # runtime: serving_vllm.py (single user), spec decode, device sampling
+    - models/demos/gemma4_tools              # native_checkpoint.py: manifest / proof verification at load
+    - models/tt_transformers                 # PagedAttentionConfig, generator base classes
+    - models/common                          # sampling generator, utility functions
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py   # UnifiedKernelDescriptor (device sampling)
+    - models/demos/deepseek_v3_b1/unified_kernels                # kernel_op_api.hpp (#included by the sampler)
+    - models/demos/deepseek_v3_b1/kernel_includes                # headers #included by unified_kernels
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release image's python_env is 3.10)
+
+runtime:
+  # tenstorrent/vllm 03fa3af + the release's 3 vLLM core files (gemma4_assistant speculative method, stop strings
+  # under speculation) + requirements pinned to the validated set (LottoLottoLotto/vllm lottolabs/gemma-4-12b-it-p150),
+  # built by ../scripts/build_vllm_wheel.sh.
+  vllm: {wheel: wheels/vllm-*.whl}
+  plugin:
+    repo: https://github.com/LottoLottoLotto/tt-model-plugins
+    ref: lottolabs/gemma-4-12b-it-p150
+  # No extra_models_dir: the plugin's built-in registry maps Gemma4UnifiedForConditionalGeneration to
+  # models.demos.gemma4.tt.serving_vllm:Gemma4SingleUserForCausalLM when GEMMA4_SINGLE_USER=1.
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  max_num_seqs: 1
+  block_size: 64
+  max_model_len: 262144
+  capabilities:
+    tool_parser: gemma4
+    reasoning_parser: gemma4
+  additional_config:
+    tt:
+      trace_mode: all
+      enable_model_warmup: true
+      trace_region_size: 200000000
+  env:
+    # Paths into the mounted HF cache (/hf = HF_HOME).  Pinning them also makes `tt-model serve` refuse to boot over
+    # an incomplete cache; the loader re-hashes every checkpoint file against its manifest at every start.
+    GEMMA4_NATIVE: /hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it
+    HF_MODEL: /hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it
+    GEMMA4_SINGLE_USER: "1"
+    GEMMA4_TOOLS_DIR: /opt/tt-metal/models/demos/gemma4_tools
+    # The TTNN binaries are compiled from the published tree, so they cannot carry the release image's byte hashes;
+    # the loader still requires the gemma4 tree, manifests, both proofs and the numerics env below to match exactly.
+    GEMMA4_PROOF_BINARIES: rebuilt
+    # Numerics switches the equivalence proofs bind (runtime_env of both proofs; set in the release image).
+    GEMMA4_VERIFY_SDPA: batched
+    GEMMA4_FUSE_GELU_MUL: "1"
+    GEMMA4_DECODE_KV_ROWS: "1"
+    GEMMA4_DECODE_MM_DN: "1"
+    HF_HUB_OFFLINE: "1"                  # serve has put the pinned snapshot on the host already
+    TRANSFORMERS_OFFLINE: "1"
+    VLLM_TARGET_DEVICE: tt
+    TORCHDYNAMO_DISABLE: "1"
+  # One FLAT list (anchored): each profile's `args: [*common_args, ...]` nests it one level, which tt-model flattens.
+  # vLLM is handed the repo id (positional, from `weights`); the loadable HF folder is gemma-4-12B-it/ inside it.
+  args: &common_args
+    - --served-model-name
+    - google/gemma-4-12B-it
+    - --hf-config-path
+    - /hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it
+    - --tokenizer
+    - /hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it
+    - --generation-config
+    - /hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it
+    - --max-num-batched-tokens
+    - "16384"
+    - --enable-chunked-prefill
+    - --seed
+    - "0"
+
+serve_profiles:
+  - name: speculative
+    description: >-
+      The release launcher's default: one user, 262,144-token context, speculative decoding with the proven
+      assistant drafter (K=5, confidence-gated beyond 4,096 tokens; exact for greedy, lossless for sampled requests),
+      exact prefix caching at 16,384-token chunk boundaries (4 host snapshots).
+    env:
+      GEMMA_PREFIX_SNAPSHOTS: "4"
+    args:
+      - *common_args
+      - --enable-prefix-caching
+      - --speculative-config
+      - '{"method": "gemma4_assistant", "model": "/hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it-assistant", "num_speculative_tokens": 5}'
+  - name: no-speculation
+    description: >-
+      launch.py --speculation off: no drafter, one token per decode step (on-device exact sampling); allows min_p,
+      logit_bias and min_tokens, which vLLM rejects under speculation.  Exact prefix caching on.
+    env:
+      GEMMA_PREFIX_SNAPSHOTS: "4"
+    args: [*common_args, --enable-prefix-caching]
+  - name: no-prefix-caching
+    description: >-
+      launch.py --prefix-caching off: speculative decoding as in the default profile, every prompt prefilled in full.
+    args:
+      - *common_args
+      - --no-enable-prefix-caching
+      - --speculative-config
+      - '{"method": "gemma4_assistant", "model": "/hf/hub/models--Lottolabs--gemma-4-12B-it-TT-BFP8-P150/snapshots/906ccca68049aadc8984929d37096203df7a1f7d/gemma-4-12B-it-assistant", "num_speculative_tokens": 5}'
+default_profile: speculative
+
+verify:
+  # the shipped gemma4 tree is exactly the one both equivalence proofs were recorded on (sha256 of its
+  # runtime_identity.gemma4_tree, as native_checkpoint.runtime_identity() computes it)
+  - "import sys, json, hashlib; sys.path.insert(0, '/opt/tt-metal/models/demos/gemma4_tools'); import native_checkpoint as n; t = n.runtime_identity()['gemma4_tree']; assert len(t) == 51 and hashlib.sha256(json.dumps(t, sort_keys=True).encode()).hexdigest() == 'ef41d955db32dabd3f929b753ff8cb6eb19e770ec8c08180d0d9d82b4780e654', 'gemma4 tree differs from the proven runtime'; assert 'GEMMA4_PROOF_BINARIES' in n.SERVING_SELECTORS"
+  - "from models.demos.gemma4.tt.serving_vllm import Gemma4SingleUserForCausalLM as M; assert M.model_capabilities['exact_prefix_resume'] and M.model_capabilities['supports_exact_device_sampling']"
+  - "import models.demos.gemma4.tt.device_sampling, models.demos.gemma4.tt.spec_greedy, models.demos.gemma4.tt.single_user"
+  - "import inspect, vllm_tt_plugin.platform as p, vllm_tt_plugin.prefix_resume; s = inspect.getsource(p); assert 'gemma4_assistant' in s and 'serving_vllm:Gemma4SingleUserForCausalLM' in s, 'plugin lacks the gemma4 changes'"
+  - "import inspect, vllm.config.speculative as s; assert 'gemma4_assistant' in inspect.getsource(s)"
+  - "import hashlib; d = '/opt/tt-metal/ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/'; h = lambda f: hashlib.sha256(open(d + f, 'rb').read()).hexdigest(); assert h('reader_bmm_tile_layout_in0_sender_padding.cpp') == 'a78857488315cac5257d5e8a93f03800bbf40acb528ba0edd0ad67660a2cbad1' and h('reader_bmm_tile_layout_in1_sender_writer_padding.cpp') == '3620262683632718607446e2a8eba75ea74cd714eee00886d3b2a00ad4f08dc4'"
+  - "assert b'TT_MM1D_IN1_DUAL_NOC' in open('/opt/tt-metal/build/lib/_ttnncpp.so', 'rb').read(), '_ttnncpp.so was not built from the 1D-matmul overlay'"
+  - "from pathlib import Path; assert Path('/opt/tt-metal/models/demos/deepseek_v3_b1/unified_kernels/kernel_op_api.hpp').is_file()"
+
+card:
+  attribution: >-
+    Derived from google/gemma-4-12B-it and google/gemma-4-12B-it-assistant (Google DeepMind, Apache-2.0): every text
+    matrix stored as TTNN BFP8 for Tenstorrent Blackhole, embedding BF16.  A community package by Lottolabs; not an
+    official Google or Tenstorrent release.
+  description: >-
+    Gemma 4 12B IT, a 12B-parameter dense decoder (48 layers, interleaved sliding-window and full attention, native
+    262,144-token context), served text-only through vLLM's OpenAI API by a custom tt-metal runtime on one P150:
+    traced decode, 16,384-token chunked prefill, sliding-window KV kept as 18,432-token rings, speculative decoding
+    with the gemma-4-12B-it-assistant drafter (exact for greedy, lossless for sampled requests), exact on-device
+    sampling with a seeded Philox RNG, and exact prefix caching.  The weights are the release
+    [Lottolabs/gemma-4-12B-it-TT-BFP8-P150](https://huggingface.co/Lottolabs/gemma-4-12B-it-TT-BFP8-P150)
+    (commit 906ccca6, runtime p3d-pc-gate-s1); the loader verifies every file against the release's manifests and
+    equivalence proofs before it loads.  The source is
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/gemma-4-12b-it-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/gemma-4-12b-it-p150),
+    [vllm lottolabs/gemma-4-12b-it-p150](https://github.com/LottoLottoLotto/vllm/tree/lottolabs/gemma-4-12b-it-p150) and
+    [tt-model-plugins lottolabs/gemma-4-12b-it-p150](https://github.com/LottoLottoLotto/tt-model-plugins/tree/lottolabs/gemma-4-12b-it-p150).
+  intended_use: >-
+    Text chat, reasoning, tool calling and long-context work (up to 262,144 tokens) for one user at a time on one
+    Tenstorrent P150.
+  prerequisites: |
+    - About 16 GB in the Hugging Face cache for `gemma-4-12B-it/` (14.7 GB) and `gemma-4-12B-it-assistant/` (1.2 GB),
+      plus room for the kernel cache written on the first start (later starts reuse it).
+    - No licence acceptance is needed: the upstream google/gemma-4-12B-it and google/gemma-4-12B-it-assistant repos
+      are Apache-2.0 and not gated, and the weights are fetched from the public Lottolabs release repo.
+  usage: |
+    Model name `google/gemma-4-12B-it`.  Images, audio and video are rejected.  Default sampling is the checkpoint's
+    generation_config (temperature 1.0, top-p 0.95, top-k 64).  Greedy and sampled requests with temperature, top-k
+    1–64, top-p and presence/frequency/repetition penalties decode on the device (speculatively in the default
+    profile); logprobs, `allowed_token_ids`, `bad_words`, `logit_bias`, structured outputs and top-k outside 1–64
+    use vLLM's exact host sampler, one token per step.  With speculation on, vLLM rejects `min_p`, `logit_bias` and
+    `min_tokens` with HTTP 400; use `--profile no-speculation` for them.  Pick a profile rather than overriding
+    vLLM flags: the loader and the proofs bind the serving configuration.
+  performance: |
+    Release-measured on runtime p3d-pc-gate-s1 over HTTP on one P150 (the same runtime as this package; release
+    evidence `evidence/p3d-pc-gate-s1/sampling/runs/{spec,nospec}-bench/`): Gemma chat prompts, 512-token outputs
+    with `ignore_eos`, one user, medians over N requests.  Greedy = temperature 0; recommended = temperature 1.0,
+    top-p 0.95, top-k 64.
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | speculative, greedy | 128 | 512 | 1 | 3 | 92 | 1,397 | 56.0 | 9.22 |
+    | speculative, greedy | 2,048 | 512 | 1 | 3 | 645 | 3,173 | 56.7 | 9.65 |
+    | speculative, greedy | 32,768 | 512 | 1 | 2 | 17,236 (cold) | 1,901 | 49.8 | 23.85 |
+    | speculative, greedy | 261,632 | 512 | 1 | 1 | ≈390,000 (cold) | ≈670 | 28.3 | — |
+    | speculative, recommended | 128 | 512 | 1 | 3 | 105 | 1,215 | 56.4 | 9.16 |
+    | speculative, recommended | 2,048 | 512 | 1 | 3 | 659 | 3,107 | 52.3 | 10.43 |
+    | no-speculation, greedy | 128 | 512 | 1 | 2 | 91 | 1,403 | 22.8 | 22.49 |
+    | no-speculation, recommended | 128 | 512 | 1 | 2 | 107 | 1,194 | 26.2 | 19.58 |
+    | no-speculation, recommended | 2,048 | 512 | 1 | 2 | 659 | 3,106 | 25.5 | 20.68 |
+
+    Cold long-prompt TTFT: 17.2 s at 32K (measured) and about 6.5 min at 262K (release README).  A prompt that
+    extends a cached one resumes at its last 16,384-token boundary (repeat of a 32K prompt: 9.9 s; of a 261,632-token
+    prompt: 42.1 s).  Speculative decode speed depends on how many drafted tokens are accepted.  Quality (release,
+    teacher-forced vs the BF16 model on CPU): chat dPPL +1.00% / top-1 98.2%, code +0.61% / 98.7%, long book
+    +1.15% / 96.5%; GSM8K-100 97/100.  This package runs the same runtime from source: a greedy request served by it
+    returns the same token ids as the release image.
+  limitations: |
+    - Text only; image, audio and video inputs are rejected.
+    - One user at a time (max_num_seqs 1), one P150 (no tensor or data parallelism).
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1) plus a TTNN 1D-matmul overlay, not on the tt-metal of the
+      current golden set.
+    - The TTNN binaries are compiled from source, so the release's equivalence proofs are applied with
+      `GEMMA4_PROOF_BINARIES=rebuilt`: the gemma4 source tree, manifests, proofs and numerics environment are still
+      checked exactly, the binary hashes are not.
+    - Long prompts have a long cold time to first token (about 17 s at 32K, about 6.5 min at 262K); prefix caching
+      resumes only at 16,384-token chunk boundaries.
+    - The first start verifies all ~16 GB of checkpoint hashes and compiles kernels; later starts still re-hash.
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+  licensing: >-
+    Weights: Apache-2.0, the licence of the upstream google/gemma-4-12B-it and google/gemma-4-12B-it-assistant
+    (https://ai.google.dev/gemma/docs/gemma_4_license; neither repo is gated) and of the Lottolabs release (see its
+    LICENSE).  This package only points at the release repo.  The TTNN runtime and serving code in `code/`, the
+    vLLM fork and the plugin are Apache-2.0.
+  license:
+    id: apache-2.0
+  pipeline_tag: text-generation
+  base_model: [google/gemma-4-12B-it]
