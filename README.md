@@ -29,7 +29,7 @@ Tenstorrent-verified.
 | dir | model | weights (pinned) | bundle | profiles (default first) |
 |---|---|---|---|---|
 | [inkling2-mini](inkling2-mini/tt-model.yaml) | Inkling-2-Mini (26.4B, 3.4B active) | [Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150) @4f2e262 | [Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150-tt-model](https://huggingface.co/Lottolabs/Inkling-2-Mini-TT-Mixed-BFP4-BFP8-P150-tt-model) | fast (16 users, 64K), long, release-256k, native (1M), quality |
-| [qwen3.8-27b](qwen3.8-27b/tt-model.yaml) | Qwen3.8-27B (+ vision, DFlash2) | [Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150) @dd18ba3 | [Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150-tt-model](https://huggingface.co/Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150-tt-model) | 8k, 8k-mtp, 8k-off, 8k-noprefix, 8k-users4/8/16, 128k, 128k-mtp, 128k-off, 128k-users4/8/16 (no 262K) |
+| [qwen3.8-27b](qwen3.8-27b/tt-model.yaml) | Qwen3.8-27B (+ vision, DFlash2), native 262K context | [Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150) @dd18ba3 | [Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150-tt-model](https://huggingface.co/Lottolabs/Qwen3.8-27B-TT-Mixed-BFP4-BFP8-P150-tt-model) | 262k (262,144 tokens, 4-bit V cache, DFlash2), 262k-mtp, 262k-off, 262k-users4/8/16, 128k, 128k-mtp, 128k-off, 128k-users4/8/16, 8k, 8k-mtp, 8k-off, 8k-noprefix, 8k-users4/8/16 |
 | [qwen3.6-35b-a3b](qwen3.6-35b-a3b/tt-model.yaml) | Qwen3.6-35B-A3B, single sequence + MTP | [Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150) @c355c41 | [Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-tt-model](https://huggingface.co/Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-tt-model) | single, single-no-mtp |
 | [qwen3.6-35b-a3b-batched](qwen3.6-35b-a3b-batched/tt-model.yaml) | Qwen3.6-35B-A3B, batched | same release @c355c41 | [Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-batched-tt-model](https://huggingface.co/Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-batched-tt-model) | batched-16, batched-8, batched-4, batched-2 |
 | [qwen3.8-flash-next-coder](qwen3.8-flash-next-coder/tt-model.yaml) | Qwen3.8-Flash-Next Coder IQ1_M (Strata server, `http-server` kind) | [Lottolabs/Qwen3.8-Flash-Next-Coder-P150](https://huggingface.co/Lottolabs/Qwen3.8-Flash-Next-Coder-P150) @69e738b | [Lottolabs/Qwen3.8-Flash-Next-Coder-P150-tt-model](https://huggingface.co/Lottolabs/Qwen3.8-Flash-Next-Coder-P150-tt-model) | mtp, plain |
@@ -44,6 +44,9 @@ pulled from the Hub, `tt serve <bundle>` with its default profile): an HTTP smok
 it has one), a greedy request returns the same prompt and output token ids as the release's own runtime, and the
 server stops cleanly on SIGTERM.  The Flash-Next-Coder bundle uses the `http-server` kind (Strata's own server, no
 vLLM), so it needs no vLLM wheel.
+Qwen3.8-27B runs the runtime of its release's 262K image for every profile; besides the default `262k` (token-equal to
+the release's 262K launch, passkeys at the start / middle / end of a 262,016-token prompt retrieved, a 262,145-token
+request rejected with HTTP 400), its `8k` and `128k` profiles were checked token-equal to the release's 8K / 128K image.
 Weights licences: Apache-2.0 (Inkling, Qwen3.8-27B, Qwen3.6, Qwen3.5-9B, Gemma 4), LFM Open License v1.0 (LFM2.5,
 LFM3), Qwen Community License (Qwen3.8-Flash-Next-Coder) — see each card.
 
