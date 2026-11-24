@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: Qwen3.5-9B, TT-native mixed BFP4/BFP8 checkpoint, on one Tenstorrent P150.
+# Release: https://huggingface.co/Lottolabs/Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150 (release prefill-mtp-20260907, commit
+# a19cf94, runtime image ghcr.io/lottolottolotto/qwen35-tt-p150@sha256:e67da563792a…).  Build from this directory:
+#   ../scripts/build_vllm_wheel.sh lottolabs/qwen3.5-9b-mixed-p150 wheels
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/qwen3.5-9b-mixed-tt-p150
+# Profiles mirror the release launcher's modes (launch.py / serve_native.py `--mtp on|off`, 8,192-token context).
+schema: "5.1"
+
+repo: Lottolabs/Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150-tt-model
+name: qwen3.5-9b-mixed-tt-p150
+
+# The release repo at its current main commit.  checkpoint/ is the TT-native package the release launcher downloads
+# (512 files, 9.63 GB: native BFP4/BFP8 tensors, lossless MTP tensors, tokenizer/config, native_manifest.json and the
+# mode-bound equivalence proofs the loader checks).  calibration/, evaluation/, evidence/ and runtime/ are not fetched.
+weights:
+  repo: Lottolabs/Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150
+  revision: a19cf94033f214205648dfe600e85a5f8cff2e4d
+  allow_patterns:
+    - "checkpoint/*"
+
+kind: vllm-plugin
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a (the release image's base) + the release runtime: the qwen36 package, the GDN
+  # experimental kernels, rmsnorm, ttnn matmul / chunk_gated_delta_rule / gated_delta_attn (compiled C++, built here)
+  # and native_checkpoint.py.
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/qwen3.5-9b-mixed-p150
+  code:
+    - models/demos/blackhole/qwen36              # runtime + vLLM adapter + JIT kernels (byte-identical to the release)
+    - models/experimental/gated_attention_gated_deltanet
+    - models/common
+    - models/tt_transformers                     # ModelArgs / generator base classes
+    - models/demos/qwen3_vl/tt/common.py
+    - models/tt_dit/utils/tensor.py
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py   # UnifiedKernelDescriptor (python)
+    - models/demos/deepseek_v3_b1/unified_kernels                # kernel_op_api.hpp (#included by the fused kernels)
+    - models/demos/deepseek_v3_b1/kernel_includes                # headers unified_kernels #include
+    - native_checkpoint.py                       # TT-native checkpoint loader (imported as a top-level module)
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release image's python_env is 3.10)
+
+runtime:
+  # tenstorrent/vllm 03fa3af unchanged + requirements pinned to the release images' python_env
+  # (LottoLottoLotto/vllm lottolabs/qwen3.5-9b-mixed-p150), built by ../scripts/build_vllm_wheel.sh.
+  vllm: {wheel: wheels/vllm-*.whl}
+  # vllm-tt-plugin of tenstorrent/vllm 03fa3af + the release's MTP-1 hooks; Qwen3.5 resolves through the plugin's
+  # built-in registry (TTQwen3_5ForConditionalGeneration -> models.demos.blackhole.qwen36.tt.qwen36_vllm).
+  plugin:
+    repo: https://github.com/LottoLottoLotto/tt-model-plugins
+    ref: lottolabs/qwen3.5-9b-mixed-p150
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  block_size: 64
+  capabilities:
+    tool_parser: qwen3_coder
+    reasoning_parser: qwen3
+  additional_config:
+    tt:
+      trace_region_size: 1073741824
+      l1_small_size: 24576
+      sample_on_device_mode: decode_only
+  env:
+    # The execution contract the checkpoint's equivalence proofs record (native_checkpoint.validate_runtime refuses
+    # to load under any other value).  MESH_DEVICE=P150 comes from mesh_device; QWEN36_MTP is per profile.
+    ARCH_NAME: "blackhole"
+    QWEN36_BFP4_LM_HEAD: "1"
+    QWEN36_BFP4_MLP_DOWN: "1"
+    QWEN36_BFP4_WEIGHTS: "1"
+    QWEN36_FUSED_FINAL_RESIDUAL_NORM: "1"
+    QWEN36_FUSED_GATE_UP: "1"
+    QWEN36_FUSED_GATE_UP_CORES: "110"
+    QWEN36_FUSED_GATE_UP_PACKED: "1"
+    QWEN36_FUSED_QKV: "1"
+    QWEN36_GATEUP_CB_SLOTS: "2"
+    QWEN36_GATEUP_OUTSTANDING: "1"
+    QWEN36_GATEUP_REQUIRE_PACKED: "1"
+    QWEN36_LM_HEAD_CB_SLOTS: "2"
+    QWEN36_LM_HEAD_OUTSTANDING: "1"
+    QWEN36_LM_HEAD_PACKED: "1"
+    QWEN36_LM_HEAD_REQUIRE_PACKED: "1"
+    QWEN36_MAX_TOKENS_ALL_USERS: "8192"
+    QWEN36_MLP_DOWN_CB_SLOTS: "2"
+    QWEN36_MLP_DOWN_OUTSTANDING: "1"
+    QWEN36_MLP_DOWN_PACKED: "1"
+    QWEN36_MLP_DOWN_REQUIRE_PACKED: "1"
+    QWEN36_SHARDED_FINAL_NORM: "1"
+    QWEN36_SINGLE_1D_DECODE: "1"
+    QWEN_GDN_FRONTEND_FUSED: "1"
+    QWEN_GDN_MEGA_CB_SLOTS: "2"
+    QWEN_GDN_MEGA_CORES: "110"
+    QWEN_GDN_MEGA_OUTSTANDING: "1"
+    QWEN_GDN_MEGA_PACKED: "1"
+    QWEN_GDN_MEGA_REQUIRE_PACKED: "1"
+    QWEN_GDN_OUTPUT_FUSED: "1"
+    QWEN_GDN_RECURRENT_FUSED: "1"
+    QWEN_SDPA_BF8: "0"
+    TT_QWEN35_TEXT_VER: "qwen36_blackhole"
+    # Paths into the mounted HF cache (/hf = HF_HOME); the release launcher mounts the same folder at /model.
+    HF_MODEL: /hf/hub/models--Lottolabs--Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150/snapshots/a19cf94033f214205648dfe600e85a5f8cff2e4d/checkpoint
+    MODEL_WEIGHTS_DIR: /hf/hub/models--Lottolabs--Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150/snapshots/a19cf94033f214205648dfe600e85a5f8cff2e4d/checkpoint
+    # Tensor cache keyed like the release launcher's (sha256 of the manifest + runtime-source identity).
+    TT_CACHE_PATH: /tensor-cache/252dd450642f06300c7b3189e28325778774a1e7475c1fbbf9bbdce92dca4131
+    QWEN36_EVAL_PRECISION: '{"layers":{"0":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"1":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp4"},"10":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"11":{"attention":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"12":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"13":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"14":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"15":{"attention":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"16":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp8"},"17":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"18":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp8"},"19":{"attention":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp8"},"2":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"20":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"21":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"22":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp8"},"23":{"attention":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"24":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"25":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"26":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"27":{"attention":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"28":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"29":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp8"},"3":{"attention":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"30":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp8"},"31":{"attention":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp8"},"4":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"5":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"6":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp8","mlp_gate_up":"bfp4"},"7":{"attention":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"8":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"},"9":{"gdn":"bfp8","gdn_output":"bfp8","mlp_down":"bfp4","mlp_gate_up":"bfp4"}},"lm_head":"bfp8"}'
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    VLLM_TARGET_DEVICE: tt
+    TORCHDYNAMO_DISABLE: "1"
+  # One FLAT list (anchored): each profile's `args: [*common_args, ...]` nests it one level, which tt-model flattens.
+  # vLLM is handed the repo id (positional, from `weights`); the loadable folder is checkpoint/ inside it.
+  args: &common_args
+    - --served-model-name
+    - Qwen/Qwen3.5-9B
+    - --hf-config-path
+    - /hf/hub/models--Lottolabs--Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150/snapshots/a19cf94033f214205648dfe600e85a5f8cff2e4d/checkpoint
+    - --tokenizer
+    - /hf/hub/models--Lottolabs--Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150/snapshots/a19cf94033f214205648dfe600e85a5f8cff2e4d/checkpoint
+    - --generation-config
+    - /hf/hub/models--Lottolabs--Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150/snapshots/a19cf94033f214205648dfe600e85a5f8cff2e4d/checkpoint
+    - --max-num-batched-tokens
+    - "16384"
+    - --seed
+    - "9472"
+    - --limit-mm-per-prompt
+    - '{"image":0,"video":0}'
+
+serve_profiles:
+  - name: mtp
+    description: >-
+      The release default (`--mtp on`): one user, 8,192-token context, MTP-1 speculative decoding with the
+      checkpoint's own MTP head.
+    max_model_len: 8192
+    max_num_seqs: 1
+    env:
+      QWEN36_MTP: "1"
+    # The MTP draft is the target checkpoint itself (vLLM's default for method mtp is the positional model, i.e. the
+    # repo root here, which has no config.json): name the same checkpoint/ folder the release mounts as /model.
+    args:
+      - *common_args
+      - - --speculative-config
+        - '{"method":"mtp","num_speculative_tokens":1,"model":"/hf/hub/models--Lottolabs--Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150/snapshots/a19cf94033f214205648dfe600e85a5f8cff2e4d/checkpoint"}'
+  - name: no-mtp
+    description: >-
+      The release's non-speculative baseline (`--mtp off`): one user, 8,192-token context, plain decoding.
+    max_model_len: 8192
+    max_num_seqs: 1
+    env:
+      QWEN36_MTP: "0"
+    args: [*common_args]
+default_profile: mtp
+
+verify:
+  # the qwen36 sources hash to the identity both equivalence proofs record (89 .py/.cpp files)
+  - "import hashlib, pathlib; r = pathlib.Path('/opt/tt-metal/models/demos/blackhole/qwen36'); fs = sorted(str(p.relative_to(r)) for p in r.rglob('*') if p.is_file() and p.suffix in ('.py', '.cpp')); d = hashlib.sha256(''.join(f + ':' + hashlib.sha256((r / f).read_bytes()).hexdigest() + chr(10) for f in fs).encode()).hexdigest(); assert d == 'b54030c9296794d500b891fb83225dfbcaee95770d7a30ba65c98b9015e96d73', d"
+  - "import native_checkpoint as n; assert n.FORMAT == 'qwen35-9b-ttnn-native-text-v1' and str(n.local_file('/a/b', 'c/d')) == '/a/b/c/d'"
+  - "from models.demos.blackhole.qwen36.tt.qwen36_vllm import Qwen36ForCausalLM"
+  - "import vllm_tt_plugin.model_runner as r, vllm_tt_plugin.worker as w; assert hasattr(r.TTModelRunner, 'take_draft_token_ids') and hasattr(w.TTWorker, 'take_draft_token_ids'), 'plugin lacks the MTP-1 hooks'"
+  - "from models.demos.deepseek_v3_b1.unified_kernel_descriptor import UnifiedKernelDescriptor; from pathlib import Path; assert Path('/opt/tt-metal/models/demos/deepseek_v3_b1/unified_kernels/kernel_op_api.hpp').is_file()"
+  - "import ttnn; assert hasattr(ttnn.transformer, 'verify_two_gated_delta_rule'), 'ttnn lacks the release C++ (GDN ops)'"
+
+card:
+  attribution: >-
+    Derived from Qwen/Qwen3.5-9B (Qwen team, Alibaba Cloud, Apache-2.0; revision c202236): text weights re-stored as a
+    TT-native mixed BFP4/BFP8 checkpoint for Tenstorrent Blackhole, embeddings, nonlinear parameters and the 15 MTP
+    tensors kept lossless.  A community package by Lottolabs; not an official Qwen or Tenstorrent release.
+  description: >-
+    Qwen3.5-9B, a 9B-parameter hybrid language model (Gated DeltaNet linear attention + gated full attention,
+    32 layers, one-layer MTP head), served text-only through vLLM's OpenAI API by a custom tt-metal runtime with
+    packed BFP4/BFP8 projections, fused Gated-DeltaNet and SwiGLU kernels, traced decode and MTP-1 speculative
+    decoding.  The weights are the TT-native checkpoint of the release
+    [Lottolabs/Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Qwen3.5-9B-TT-Mixed-BFP4-BFP8-P150)
+    (release prefill-mtp-20260907, commit a19cf94); the source is
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/qwen3.5-9b-mixed-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/qwen3.5-9b-mixed-p150),
+    [vllm lottolabs/qwen3.5-9b-mixed-p150](https://github.com/LottoLottoLotto/vllm/tree/lottolabs/qwen3.5-9b-mixed-p150) and
+    [tt-model-plugins lottolabs/qwen3.5-9b-mixed-p150](https://github.com/LottoLottoLotto/tt-model-plugins/tree/lottolabs/qwen3.5-9b-mixed-p150).
+  intended_use: >-
+    Single-user text chat, reasoning and tool calling with up to 8,192 tokens of context on one Tenstorrent P150.
+  prerequisites: |
+    - About 9.7 GB in the Hugging Face cache for the release's `checkpoint/`, plus space for the kernel and device
+      tensor caches written on the first start (the first start compiles kernels and converts the checkpoint; later
+      starts reuse the caches).
+  usage: |
+    Model name `Qwen/Qwen3.5-9B`.  Images and video are rejected (`--limit-mm-per-prompt` 0).  Thinking is on by
+    default; disable it per request with `"chat_template_kwargs": {"enable_thinking": false}`.  Reasoning is returned
+    in `reasoning`, tool calls through the `qwen3_coder` parser.  The default `mtp` profile drafts one token per step
+    with the checkpoint's MTP head for a single greedy request; `--profile no-mtp` serves without speculation.
+    Logit bias is rejected (HTTP 400) under the `mtp` profile, as in the release.
+  performance: |
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | mtp (default) | 55 | 128 | 1 | 3 | 135 | — | 50.6 | 2.65 |
+    | no-mtp | 55 | 128 | 1 | 3 | 126 | — | 36.6 | 3.60 |
+    | mtp | 128 | 1 | 1 | 3 | 123 | 1,042 | — | 0.12 |
+    | mtp | 2,048 | 1 | 1 | 3 | 761 | 2,690 | — | 0.76 |
+    | mtp | 7,936 | 1 | 1 | 3 | 3,109 | 2,552 | — | 3.11 |
+    | no-mtp | 7,936 | 1 | 1 | 3 | 3,104 | 2,557 | — | 3.10 |
+
+    Measured by the release (prefill-mtp-20260907, its published image, evidence/prefill-mtp-20260907/public-api-*.json
+    and public-prefill-*.json in the release repo) through the OpenAI server: greedy chat, thinking disabled, median of
+    3 measured requests after warmup; decode tok/s excludes the first output token; prefill rows are client-observed
+    one-output-token latency (HTTP + scheduling + prefill), not isolated kernel time.  Not re-measured on this
+    package; a greedy request served by this package returns the same token ids as the release image.  Release
+    quality notes (previous runtime, same weights): GSM8K shard 97/101, ARC-Challenge shard 754/800 with MTP on.
+  limitations: |
+    - Text only; image and video inputs are rejected.  One P150, one active sequence (`max_num_seqs` 1), at most
+      8,192 tokens of context (the release launcher's limit).
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1) with the release's ttnn C++ changes, not on the tt-metal of
+      the current golden set.
+    - The checkpoint is quantized (mixed BFP4/BFP8): its outputs are not equal to the BF16 Qwen3.5-9B.  The loader
+      refuses to run under any runtime environment or source other than the one its equivalence proofs record, so
+      the profile env must not be edited.
+    - MTP-1 drafts only for a single greedy request; sampled requests decode without speculation.  Logit bias is
+      rejected with MTP on.
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+  licensing: >-
+    Weights: Apache-2.0 (the upstream Qwen/Qwen3.5-9B licence, see the release repo's LICENSE and checkpoint/LICENSE).
+    The TTNN runtime and serving code in `code/`, the vLLM fork and the plugin are Apache-2.0.
+  license:
+    id: apache-2.0
+  pipeline_tag: text-generation
+  base_model: [Qwen/Qwen3.5-9B]
