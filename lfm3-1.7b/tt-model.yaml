@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: LFM3-1.7B on one Tenstorrent P150.
+# Release: https://huggingface.co/Lottolabs/LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150 (release s14-20261113, commit 6219d70,
+# runtime image lottolabs/lfm3-1.7b-tt-p150:s14-20261113).  Build from this directory:
+#   ../scripts/build_vllm_wheel.sh lottolabs/lfm3-1.7b-p150 wheels
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/lfm3-1.7b-tt-p150
+# Profiles mirror the release's launch.py modes (--max-num-seqs 1/4/16, --drafter off, --thinking off with the agentic
+# sampling preset); every profile serves 131,072 tokens per sequence like launch.py's default.
+schema: "5.1"
+
+repo: Lottolabs/LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150-tt-model
+name: lfm3-1.7b-tt-p150
+
+# The release repo at its current commit (release s14-20261113 + its verification record).  checkpoint/ is the lfmq-1
+# GPTQ BFP4/BFP8 checkpoint (with the original config / tokenizer / chat template), drafter/ the block drafter the
+# release loads (the same model.safetensors as Lottolabs/LFM3-1.7B-DFlash-Drafter step 11,000).  runtime-image.tar.gz,
+# runtime/ and evidence/ are not fetched.
+weights:
+  repo: Lottolabs/LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150
+  revision: 6219d705f2137e577959f5d27e0045a8548f5a37
+  allow_patterns:
+    - "LICENSE"
+    - "checkpoint/*"
+    - "drafter/*"
+
+kind: vllm-plugin
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a (v0.76.0 + 1) + the Lottolabs Qwen3.6 P150 overlays the release image is built
+  # on (Python, JIT kernels and the ttnn matmul / gated-delta host C++, built from this tree) +
+  # models/demos/blackhole/lfm3.
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/lfm3-1.7b-p150
+  code:
+    - models/demos/blackhole/lfm3               # runtime, vLLM adapter, JIT kernels, vllm_bundle/
+    - models/demos/blackhole/qwen36             # tt/tile_argmax (LM-head argmax); tt/device_sampling (plugin import)
+    - models/tt_transformers                    # Generator / Mode (the adapter's base)
+    - models/common                             # tt_transformers' dependencies
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py   # UnifiedKernelDescriptor (python)
+    - models/demos/deepseek_v3_b1/unified_kernels                # kernel_op_api.hpp & co (#included by lfm3 kernels)
+    - models/demos/deepseek_v3_b1/kernel_includes                # (#included by unified_kernels)
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release image's python_env is 3.10.12)
+
+runtime:
+  # tenstorrent/vllm 03fa3af + the Qwen3.6 core overlays + the LFM3 sampling-params / streamed-reasoning patches +
+  # requirements pinned to the validated set (LottoLottoLotto/vllm lottolabs/lfm3-1.7b-p150), built by
+  # ../scripts/build_vllm_wheel.sh.
+  vllm: {wheel: wheels/vllm-*.whl}
+  plugin:
+    repo: https://github.com/LottoLottoLotto/tt-model-plugins
+    ref: lottolabs/lfm3-1.7b-p150
+  extra_models_dir: models/demos/blackhole/lfm3/vllm_bundle/models
+  # vLLM general plugin `lfm3_config` (config class for model_type lfm3 without remote code)
+  extension: models/demos/blackhole/lfm3/vllm_bundle/ext
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  block_size: 64
+  capabilities:
+    tool_parser: lfm3
+    reasoning_parser: lfm3
+  additional_config:
+    tt:
+      trace_mode: all
+      sample_on_device_mode: decode_only
+      enable_model_warmup: true
+      trace_region_size: 268435456
+      l1_small_size: 24576
+  env:
+    # Paths into the mounted HF cache (/hf = HF_HOME).  Pinning them also makes `tt-model serve` refuse to boot over
+    # an incomplete cache (the runtime opens these directly).  The tensor cache is TT_CACHE_PATH (/tensor-cache, set by
+    # tt-model) + /tensors.
+    MODEL_WEIGHTS_DIR: /hf/hub/models--Lottolabs--LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150/snapshots/6219d705f2137e577959f5d27e0045a8548f5a37/checkpoint
+    LFM3_DRAFTER: /hf/hub/models--Lottolabs--LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150/snapshots/6219d705f2137e577959f5d27e0045a8548f5a37/drafter
+    LFM_QUANT_PKG: /opt/tt-metal/models/demos/blackhole/lfm3/vllm_bundle    # lfmq/ (checkpoint reader)
+    HF_HUB_OFFLINE: "1"                  # serve has put the pinned snapshot on the host already
+    TRANSFORMERS_OFFLINE: "1"
+    VLLM_TARGET_DEVICE: tt
+    TORCHDYNAMO_DISABLE: "1"
+    VLLM_TT_TOKS: "0"                    # toks prompt encoding is not shipped: HF tokenizer, same ids
+    LFM_FAST_DECODE: "1"
+    LFM3_SPECULATE: "1"
+    LFM3_SPEC_DRAFTER: "1"
+    LFM3_DEFAULT_SAMPLING_LABEL: preset liquid
+    LFM3_DEFAULT_SAMPLING_JSON: '{"temperature": 0.1, "top_k": 50, "repetition_penalty": 1.1}'
+  # One FLAT list (anchored): each profile's `args: [*common_args, ...]` nests it one level, which tt-model flattens.
+  # vLLM is handed the repo id (positional, from `weights`); the loadable HF folder is checkpoint/ inside it.
+  args: &common_args
+    - --served-model-name
+    - LiquidAI/LFM3-1.7B
+    - --hf-config-path
+    - /hf/hub/models--Lottolabs--LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150/snapshots/6219d705f2137e577959f5d27e0045a8548f5a37/checkpoint
+    - --tokenizer
+    - /hf/hub/models--Lottolabs--LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150/snapshots/6219d705f2137e577959f5d27e0045a8548f5a37/checkpoint
+    - --seed
+    - "9472"
+    - --max-num-batched-tokens
+    - "131072"
+    - --enable-prefix-caching
+    - --no-enable-chunked-prefill
+    - --tool-parser-plugin
+    - /opt/tt-metal/models/demos/blackhole/lfm3/vllm_bundle/lfm3_parsers.py
+    - --reasoning-parser-plugin
+    - /opt/tt-metal/models/demos/blackhole/lfm3/vllm_bundle/lfm3_parsers.py
+    - --generation-config
+    - vllm
+    - --speculative-config
+    - '{"method":"ngram","num_speculative_tokens":15,"prompt_lookup_min":2,"prompt_lookup_max":4}'
+
+serve_profiles:
+  - name: single
+    description: >-
+      One user, 131,072-token context, prompt-lookup + block-drafter speculation, thinking on, default sampling
+      liquid (T 0.1, top-k 50, repetition 1.1), exact prefix caching (the release launcher's defaults).
+    max_model_len: 131072
+    max_num_seqs: 1
+    env:
+      LFM3_MAX_TOKENS_ALL_USERS: "131072"
+    args: [*common_args, &liquid [--override-generation-config, '{"temperature": 0.1, "top_k": 50, "repetition_penalty": 1.1}']]
+  - name: batch4
+    description: Up to 4 concurrent users x 131,072 tokens (524,288-token KV pool), speculation in shared rounds.
+    max_model_len: 131072
+    max_num_seqs: 4
+    env:
+      LFM3_MAX_TOKENS_ALL_USERS: "524288"
+    args: [*common_args, *liquid]
+  - name: batch16
+    description: >-
+      Up to 16 concurrent users x 131,072 tokens (1,572,864-token shared KV pool), speculation in shared rounds (the
+      configuration of the release's concurrent-user tables).
+    max_model_len: 131072
+    max_num_seqs: 16
+    env:
+      LFM3_MAX_TOKENS_ALL_USERS: "1572864"
+    args: [*common_args, *liquid]
+  - name: lookup-only
+    description: One user, 131,072 tokens, prompt-lookup speculation without the block drafter (launch.py --drafter off).
+    max_model_len: 131072
+    max_num_seqs: 1
+    env:
+      LFM3_MAX_TOKENS_ALL_USERS: "131072"
+      LFM3_SPEC_DRAFTER: "0"
+    args: [*common_args, *liquid]
+  - name: agentic
+    description: >-
+      One user, 131,072 tokens, thinking off by default and the agentic sampling preset (T 0.6, top-p 0.95), for agent
+      harnesses (launch.py --thinking off --sampling-preset agentic).
+    max_model_len: 131072
+    max_num_seqs: 1
+    env:
+      LFM3_MAX_TOKENS_ALL_USERS: "131072"
+      LFM3_DEFAULT_SAMPLING_LABEL: preset agentic
+      LFM3_DEFAULT_SAMPLING_JSON: '{"temperature": 0.6, "top_p": 0.95}'
+    args:
+      - *common_args
+      - [--override-generation-config, '{"temperature": 0.6, "top_p": 0.95}']
+      - [--default-chat-template-kwargs, '{"enable_thinking": false}']
+default_profile: single
+
+verify:
+  - "from models.demos.blackhole.lfm3.tt.lfm3_vllm import Lfm3ForCausalLM as M; import models.demos.blackhole.lfm3.tt.speculate, models.demos.blackhole.lfm3.tt.drafter, models.demos.blackhole.qwen36.tt.tile_argmax"
+  - "import lfm3_vllm_config; from importlib.metadata import entry_points; assert any(e.name == 'lfm3_config' for e in entry_points(group='vllm.general_plugins'))"
+  - "import inspect, vllm_tt_plugin.model_runner as r, vllm_tt_plugin.decode_ahead; s = inspect.getsource(r); assert 'exact_sampling_eligible' in s and 'lookup_plan' in s, 'plugin lacks the lfm3 changes'"
+  - "import sys; sys.path.insert(0, '/opt/tt-metal/models/demos/blackhole/lfm3/vllm_bundle'); from lfmq.reader import open_checkpoint"
+  - "import importlib.util as u; assert u.spec_from_file_location('p', '/opt/tt-metal/models/demos/blackhole/lfm3/vllm_bundle/lfm3_parsers.py')"
+  - "from pathlib import Path; assert Path('/opt/tt-metal/models/demos/deepseek_v3_b1/unified_kernels/kernel_op_api.hpp').is_file() and Path('/opt/tt-metal/models/demos/blackhole/qwen36/tt/tile_argmax_kernel.cpp').is_file()"
+  - "import vllm.sampling_params as s, inspect; assert 'current_platform.device_type == \"tt\"' in inspect.getsource(s), 'vLLM lacks the lfm3 sampling-params patch'"
+
+card:
+  attribution: >-
+    Derived from LiquidAI/LFM3-1.7B (Liquid AI, LFM Open License v1.0): MLP weights GPTQ-quantized to BFP4 / BFP8 and
+    every other Linear rounded to BFP8 for Tenstorrent Blackhole, plus a block drafter trained by Lottolabs.  A
+    community package by Lottolabs; not an official Liquid AI or Tenstorrent release.
+  description: >-
+    LFM3-1.7B, Liquid AI's 1.7B-parameter hybrid model (13 gated short-convolution layers, 6 full-attention and 5
+    sliding-window attention layers, dense SwiGLU MLPs), served text-only through vLLM's OpenAI API on one P150 by a
+    custom tt-metal runtime: fused traced decode and prefill kernels, exact on-device sampling, prompt-lookup and
+    block-drafter speculative decoding in shared verify rounds for up to 16 concurrent users, exact prefix caching,
+    131,072 tokens per sequence.  The weights are the release
+    [Lottolabs/LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150)
+    (release s14-20261113); the source is
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/lfm3-1.7b-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/lfm3-1.7b-p150),
+    [vllm lottolabs/lfm3-1.7b-p150](https://github.com/LottoLottoLotto/vllm/tree/lottolabs/lfm3-1.7b-p150) and
+    [tt-model-plugins lottolabs/lfm3-1.7b-p150](https://github.com/LottoLottoLotto/tt-model-plugins/tree/lottolabs/lfm3-1.7b-p150).
+  intended_use: >-
+    Text chat, reasoning, tool calling and agentic coding on one Tenstorrent P150, for one to sixteen concurrent users,
+    within the terms of the LFM Open License v1.0.
+  prerequisites: |
+    - About 2.4 GB in the Hugging Face cache for `checkpoint/` and `drafter/`, plus a few GB for the kernel and
+      device tensor caches written on the first start (later starts reuse them).
+  usage: |
+    Model name `LiquidAI/LFM3-1.7B`.  Reasoning is returned in `reasoning` (thinking is on by default; per request
+    `"chat_template_kwargs": {"enable_thinking": false}`).  Tool calls use LFM3's XML format, parsed into OpenAI
+    `tool_calls`.  Default sampling for requests that set none is Liquid's generation_config (T 0.1, top-k 50,
+    repetition 1.1; the `agentic` profile: T 0.6, top-p 0.95); greedy and sampled steps run on the device with vLLM's
+    exact semantics, and speculation never changes the output.  Pick a profile (`--profile batch16`, ...) rather than
+    overriding `--max-num-seqs` / `--max-model-len`: each profile carries its own KV pool size.
+  performance: |
+    Quality, teacher-forced against the original BF16 model (57,876 scored tokens of chat / instruct / code / book):
+    all-corpus PPL 5.4326 → 5.4625 (+0.55%), top-1 agreement 0.932, mean KL 0.0243; GSM8K (first 50, greedy, thinking
+    on) 48/50 vs 48/50 for BF16.
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | single (chat_2k) | 2,292 | 1,536 | 1 | 3 | 34 | — | 406.8 | — |
+    | single (gsm8k) | 73 | 502 | 1 | 3 | 25 | — | 499.8 | — |
+    | single (code_edit, thinking off) | 3,685 | 3,650 | 1 | 3 | 98 | — | 1,481.0 | — |
+    | single (1-token completion) | 2,048 | 1 | 1 | 3 | 49 | 41,500 | — | — |
+    | batch16 (chat_2k) | 2,292 | 1,536 | 1 | 3 | — | — | 438.7 | — |
+    | batch16 (chat_2k) | 2,292 | 1,536 | 4 | 3 | — | — | 279.3 | — |
+    | batch16 (chat_2k) | 2,292 | 1,536 | 16 | 3 | — | — | 184.1 | — |
+    | batch16 (code_edit, thinking off) | 3,685 | 3,650 | 1 | 3 | — | — | 1,485.3 | — |
+    | batch16 (code_edit, thinking off) | 3,685 | 3,650 | 16 | 3 | — | — | 164.6 | — |
+    | batch16 (gsm8k) | 73 | 432 | 4 | 3 | — | — | 338.7 | — |
+    | batch16 (greedy) | 32,768 | 512 | 1 | 1 | 747 | 43,900 | 480.3 | — |
+    | batch16 (greedy) | 32,768 | 512 | 16 | 1 | 8,622 | — | 40.1 | — |
+
+    Release-measured on the release image (s14) through its OpenAI server, streamed, default sampling unless noted,
+    median of 3 (decode tok/s/u = (tokens − 1) / (last − first chunk)): single rows from the release's 1-slot runs
+    (chat_2k / gsm8k, s14 drafter evaluation; the 1-token TTFT row from the s11 prefill benchmark, prefill unchanged
+    since), batch16 rows from the release's 16-slot workload benchmark (evidence/logs/bench/dev-s14 in the release
+    repo).  This package runs the same runtime: a greedy request served by it returns the same token ids as the
+    release image.
+  limitations: |
+    - Text only.  One P150 only (no tensor or data parallelism).
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1), not on the tt-metal of the current golden set.
+    - At most 131,072 tokens per sequence (the fused decode step's limit) and max_num_seqs 1, 2, 4, 8 or 16.
+    - The checkpoint is GPTQ BFP4 / BFP8 (KL 0.0243 vs BF16); it is not GGUF / AWQ / a Transformers checkpoint and
+      only this runtime reads it.
+    - The drafter adds speed for 1-4 users on novel text; from 8 users on it rarely drafts.
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+  licensing: >-
+    Weights: LFM Open License v1.0 (Liquid AI; see LICENSE in the release repo and its NOTICE-original-model-card.md).
+    Commercial use is licensed only to entities below USD 10 million annual revenue (section 5); redistribution must
+    carry the licence.  The TTNN runtime and serving code in `code/`, the vLLM fork and the plugin are Apache-2.0.
+  license:
+    id: other
+    name: LFM Open License v1.0
+    link: https://huggingface.co/Lottolabs/LFM3-1.7B-TT-Mixed-BFP4-BFP8-P150/blob/6219d705f2137e577959f5d27e0045a8548f5a37/LICENSE
+  pipeline_tag: text-generation
+  base_model: [LiquidAI/LFM3-1.7B]
