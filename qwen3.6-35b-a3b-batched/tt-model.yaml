@@ -1,0 +1,233 @@
+# SPDX-FileCopyrightText: © 2026 Lottolabs
+# SPDX-License-Identifier: Apache-2.0
+#
+# tt-model (v5.1 container) manifest: Qwen3.6-35B-A3B on one Tenstorrent P150, batched (2-16 users) runtime.
+# Release: https://huggingface.co/Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150 (release x6-fused-20261007,
+# commit c355c41d, runtime image lottolabs/qwen36-35b-tt-p150:batched-x6).  The release's default single-sequence
+# mode runs a different runtime tree (image single-x6) and is packaged separately: ../qwen3.6-35b-a3b/tt-model.yaml.
+# Build from this directory:
+#   ../scripts/build_vllm_wheel.sh lottolabs/qwen3.6-35b-a3b-batched-p150 wheels
+#   tt-model package --container tt-model.yaml --out build
+#   tt-model push build/qwen3.6-35b-a3b-batched-tt-p150
+# Profiles mirror the release launcher's batched mode (launch.py --mode batched --max-num-seqs N, N rounded up to
+# 2/4/8/16 slots).
+schema: "5.1"
+
+repo: Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-batched-tt-model
+name: qwen3.6-35b-a3b-batched-tt-p150
+
+# The release repo at its pinned commit.  checkpoint/ is the TT-native checkpoint (BFP4 GPTQ experts, BFP8 dense,
+# BF16 rest, MTP head; 21.7 GB) with the upstream config / tokenizer / chat template.  runtime-image.tar.gz,
+# runtime/, evidence/ and tools/ are not fetched.
+weights:
+  repo: Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150
+  revision: c355c41d4fd079c6df3c4ba9bab1c40f37c17f09
+  allow_patterns:
+    - "checkpoint/*"
+
+kind: vllm-plugin
+arch: blackhole
+
+image:
+  registry: hf
+
+source:
+  # public tenstorrent/tt-metal de59f8a (v0.76.0 + 1) + the Qwen3.6 runtime of the release's batched image: the qwen36
+  # model package, MoE modules and kernels, gated deltanet overlays, tt_transformers generator, and host C++ for
+  # ttnn matmul / sparse_matmul / chunk_gated_delta_rule / gated_delta_attn (built from this tree).
+  tt_metal:
+    repo: https://github.com/LottoLottoLotto/tt-metal
+    ref: lottolabs/qwen3.6-35b-a3b-batched-p150
+  code:
+    - models/demos/blackhole/qwen36                            # runtime, vLLM adapter, JIT kernels
+    - models/common                                            # moe modules + kernels, rmsnorm, sampling, warmup
+    - models/tt_transformers                                   # generator / model args the runtime builds on
+    - models/experimental/gated_attention_gated_deltanet       # GDN / gated attention ops + kernels
+    - models/demos/deepseek_v3_b1/unified_kernel_descriptor.py # UnifiedKernelDescriptor (python)
+    - models/demos/deepseek_v3_b1/unified_kernels              # kernel_op_api.hpp & co (#included)
+    - models/demos/deepseek_v3_b1/kernel_includes              # compute_kernel_api/*.h (#included)
+    - models/demos/qwen3_vl/tt/common.py                       # helpers imported by the qwen36 package
+    - models/tt_dit/utils/tensor.py                            # helper imported by tt_transformers
+  ubuntu: "22.04"
+  python: "3.10"            # the validated interpreter (the release image's python_env is 3.10.12)
+
+runtime:
+  # tenstorrent/vllm 03fa3af + the Qwen3.6 core overlays + requirements pinned to the validated set (incl. torchvision)
+  # (LottoLottoLotto/vllm lottolabs/qwen3.6-35b-a3b-batched-p150; same commit as the single package), built by ../scripts/build_vllm_wheel.sh.
+  vllm: {wheel: wheels/vllm-*.whl}
+  plugin:
+    repo: https://github.com/LottoLottoLotto/tt-model-plugins
+    ref: lottolabs/qwen3.6-35b-a3b-batched-p150
+
+serve:
+  hardware: p150
+  mesh_device: P150
+  block_size: 64
+  capabilities:
+    tool_parser: qwen3_coder
+    reasoning_parser: qwen3
+  additional_config:
+    tt:
+      trace_mode: all
+      enable_model_warmup: true
+      trace_region_size: 1073741824
+      l1_small_size: 24576
+  env:
+    # Paths into the mounted HF cache (/hf = HF_HOME).  Pinning them also makes `tt-model serve` refuse to boot over
+    # an incomplete cache (the runtime opens these directly).
+    HF_MODEL: /hf/hub/models--Lottolabs--Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150/snapshots/c355c41d4fd079c6df3c4ba9bab1c40f37c17f09/checkpoint
+    MODEL_WEIGHTS_DIR: /hf/hub/models--Lottolabs--Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150/snapshots/c355c41d4fd079c6df3c4ba9bab1c40f37c17f09/checkpoint
+    TT_CACHE_PATH: /tensor-cache         # converted-weight cache (tt-model mounts ~/.cache/tt-model/<name>/tensors here)
+    HF_HUB_OFFLINE: "1"                  # serve has put the pinned snapshot on the host already
+    TRANSFORMERS_OFFLINE: "1"
+    VLLM_TARGET_DEVICE: tt
+    TORCHDYNAMO_DISABLE: "1"
+    # The release image's environment (runtime build switches; all part of the validated configuration)
+    QWEN36_OPTIMIZED_27B: "0"
+    QWEN36_GENERIC_BASELINE: "0"
+    QWEN36_MTP_DRAFT_VOCAB: "98304"
+    QWEN36_BFP4_WEIGHTS: "0"
+    QWEN36_SINGLE_1D_DECODE: "1"
+    QWEN36_FUSED_QKV: "1"
+    QWEN36_SHARDED_FINAL_NORM: "1"
+    QWEN36_FUSED_FINAL_RESIDUAL_NORM: "1"
+    QWEN_SDPA_BF8: "1"
+    QWEN_GDN_RECURRENT_FUSED: "1"
+    QWEN_GDN_FRONTEND_FUSED: "1"
+    QWEN_GDN_OUTPUT_FUSED: "1"
+    # The release launcher's per-run settings
+    QWEN36_DFLASH: "0"
+    QWEN36_MTP_DEPTH: "1"
+    QWEN36_MAX_TOKENS_ALL_USERS: "262144"
+    QWEN36_MTP: "0"                      # batched mode is non-speculative
+    QWEN36_PREFIX_SNAPSHOTS: "32"
+  # One FLAT list (anchored): each profile's `args: [*common_args, ...]` nests it one level, which tt-model flattens.
+  # vLLM is handed the repo id (positional, from `weights`); the loadable HF folder is checkpoint/ inside it.
+  args: &common_args
+    - --served-model-name
+    - Qwen/Qwen3.6-35B-A3B
+    - --hf-config-path
+    - /hf/hub/models--Lottolabs--Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150/snapshots/c355c41d4fd079c6df3c4ba9bab1c40f37c17f09/checkpoint
+    - --tokenizer
+    - /hf/hub/models--Lottolabs--Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150/snapshots/c355c41d4fd079c6df3c4ba9bab1c40f37c17f09/checkpoint
+    - --generation-config
+    - /hf/hub/models--Lottolabs--Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150/snapshots/c355c41d4fd079c6df3c4ba9bab1c40f37c17f09/checkpoint
+    - --seed
+    - "9472"
+    - --limit-mm-per-prompt
+    - '{"image":0,"video":0}'
+    - --enable-prefix-caching
+    - --enable-chunked-prefill
+
+serve_profiles:
+  - name: batched-16
+    description: >-
+      The release launcher's batched default: up to 16 concurrent sequences, non-speculative, chunked prefill (2,048-token chunks), exact prefix caching, 262,144-token context per
+      request in a shared 262,144-token KV pool.
+    max_model_len: 262144
+    max_num_seqs: 16
+    args: [*common_args, [--max-num-batched-tokens, "2064"]]
+  - name: batched-8
+    description: >-
+      Up to 8 concurrent sequences, non-speculative, chunked prefill (2,048-token chunks), exact prefix caching, 262,144-token context per
+      request in a shared 262,144-token KV pool.
+    max_model_len: 262144
+    max_num_seqs: 8
+    args: [*common_args, [--max-num-batched-tokens, "2056"]]
+  - name: batched-4
+    description: >-
+      Up to 4 concurrent sequences, non-speculative, chunked prefill (2,048-token chunks), exact prefix caching, 262,144-token context per
+      request in a shared 262,144-token KV pool.
+    max_model_len: 262144
+    max_num_seqs: 4
+    args: [*common_args, [--max-num-batched-tokens, "2052"]]
+  - name: batched-2
+    description: >-
+      Up to 2 concurrent sequences, non-speculative, chunked prefill (2,048-token chunks), exact prefix caching, 262,144-token context per
+      request in a shared 262,144-token KV pool.
+    max_model_len: 262144
+    max_num_seqs: 2
+    args: [*common_args, [--max-num-batched-tokens, "2050"]]
+default_profile: batched-16
+
+verify:
+  - "from models.demos.blackhole.qwen36.tt.qwen36_vllm import Qwen36ForCausalLM"
+  - "import models.demos.blackhole.qwen36.tt.attention.kv_write, models.common.modules.moe.batched_experts, models.demos.blackhole.qwen36.tt.model, models.demos.blackhole.qwen36.tt.mtp, models.demos.blackhole.qwen36.tt.speculative, models.demos.blackhole.qwen36.tt.device_sampling, models.demos.blackhole.qwen36.tt.native_moe_checkpoint"
+  - "import torchvision; assert torchvision.__version__.split('+')[0] == '0.26.0', torchvision.__version__"
+  - "import ttnn; assert hasattr(ttnn.transformer, 'verify_two_gated_delta_rule'), 'ttnn lacks the Qwen3.6 GDN ops (C++ not built from the branch)'"
+  - "import inspect, vllm_tt_plugin.platform as p; assert 'argmaxes on' in inspect.getsource(p), 'plugin lacks the batched on-device greedy path'"
+  - "import vllm_tt_plugin.prefix_resume, importlib.util as u; assert u.find_spec('vllm_tt_plugin.toks_tokenizer') is None"
+  - "import inspect, vllm_tt_plugin.platform as p; assert 'TTQwen3_5MoeForConditionalGeneration' in inspect.getsource(p)"
+  - "import inspect, vllm.config.speculative as s; assert 'dflash' in inspect.getsource(s)"
+  - "from pathlib import Path; assert Path('/opt/tt-metal/models/demos/deepseek_v3_b1/unified_kernels/kernel_op_api.hpp').is_file() and Path('/opt/tt-metal/models/common/modules/moe/kernels/routing_math.hpp').is_file()"
+
+card:
+  attribution: >-
+    Derived from Qwen/Qwen3.6-35B-A3B (Qwen team, Alibaba Cloud, Apache-2.0): routed and shared experts quantized to
+    GPTQ BFP4 and dense projections / LM head to BFP8 for Tenstorrent Blackhole.  A community package by Lottolabs;
+    not an official Qwen or Tenstorrent release.
+  description: >-
+    Qwen3.6-35B-A3B, a 35B-parameter (3B active) hybrid MoE language model — 40 layers of Gated DeltaNet linear
+    attention and gated full attention, 256-expert MoE with a shared expert, native 262,144-token context — served
+    text-only through vLLM's OpenAI API by a custom tt-metal runtime with traced batched decode of 2–16 concurrent
+    sequences, chunked prefill, on-device greedy argmax, exact prefix caching (non-speculative; the release's default
+    single-sequence MTP-1 mode is the separate package
+    [Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-tt-model](https://huggingface.co/Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150-tt-model)).
+    The weights are the release
+    [Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150](https://huggingface.co/Lottolabs/Qwen3.6-35B-A3B-TT-Mixed-BFP4-BFP8-P150)
+    (release x6-fused-20261007, commit c355c41d); the source is
+    [LottoLottoLotto/tt-model-bundles](https://github.com/LottoLottoLotto/tt-model-bundles) (manifest),
+    [tt-metal lottolabs/qwen3.6-35b-a3b-batched-p150](https://github.com/LottoLottoLotto/tt-metal/tree/lottolabs/qwen3.6-35b-a3b-batched-p150),
+    [vllm lottolabs/qwen3.6-35b-a3b-batched-p150](https://github.com/LottoLottoLotto/vllm/tree/lottolabs/qwen3.6-35b-a3b-batched-p150) and
+    [tt-model-plugins lottolabs/qwen3.6-35b-a3b-batched-p150](https://github.com/LottoLottoLotto/tt-model-plugins/tree/lottolabs/qwen3.6-35b-a3b-batched-p150).
+  intended_use: >-
+    Text chat, reasoning, tool calling and long-context work for 2–16 concurrent users on one Tenstorrent P150.
+  prerequisites: |
+    - About 22 GB in the Hugging Face cache for `checkpoint/`, plus about 25 GB for the converted-weight and kernel
+      caches written on the first start (the first start takes about 15 minutes; later starts reuse them).
+    - 64 GB of host RAM or more recommended (the model load peaks around 50 GB).
+  usage: |
+    Model name `Qwen/Qwen3.6-35B-A3B`.  Images and video are rejected.  Reasoning is returned in `reasoning`
+    (Qwen3 reasoning parser); tools use the `qwen3_coder` parser; disable thinking per request with
+    `"chat_template_kwargs": {"enable_thinking": false}`.  Default sampling is the checkpoint's generation_config.
+    All-greedy decode steps argmax on the device; random sampling, penalties, logprobs and structured output run
+    on vLLM's host path.  Pick the profile with the fewest slots that covers your concurrency (fewer slots decode
+    faster per user) rather than overriding `--max-num-seqs` or `--max-model-len`.
+  performance: |
+    Quality, teacher-forced on the P150 against a CPU BF16 run of the original checkpoint (58,509 scored tokens; same
+    weights as the single-sequence package): ΔPPL +4.78%, top-1 agreement 0.918, mean KL 0.075 (all corpora).
+    GSM8K (first 100, thinking off, greedy, 16 slots): 87/100 (CPU BF16 original: 90/100).
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | batched-16 | 128 | 512 | 1 | — | — | — | 86.1 | — |
+    | batched-16 | 128 | 512 | 4 | — | — | — | 74.5 | — |
+    | batched-16 | 128 | 512 | 8 | — | — | — | 70.0 | — |
+    | batched-16 | 128 | 512 | 16 | — | — | — | 56.1 | — |
+    | batched-16 | 2,048 | 512 | 1 | — | — | — | 86.0 | — |
+    | batched-16 | 2,048 | 512 | 16 | — | — | — | 19.8 | — |
+
+    Release measurements (release README, batched image, 16 slots): median per-request decode tok/s of greedy
+    streamed requests; aggregate output at 16 users and 128-token prompts 731 tok/s.  TTFT was not reported per
+    concurrency.  This package runs the same runtime: a greedy request served by it returns the same token ids as
+    the release image.
+  limitations: |
+    - Text only; image and video inputs are rejected (the vision encoder is not shipped).
+    - Non-speculative.  For one user the single-sequence package (MTP-1, ~139 tok/s) is faster.  One P150 only.
+    - Not batch-invariant: with more than one active sequence, greedy outputs can differ from the same request
+      served alone (batched kernels round differently with batch composition), and the sampling distribution differs
+      measurably from the single-sequence runtime between near-tied tokens.
+    - Logprobs, penalties, random sampling and structured output use the host sampler (slower).
+    - Quality is measured, not certified: the gap to BF16 is larger on code and long prose than on chat.
+    - Tested on P150 firmware 19.15.0 with tt-kmd 2.11.0.  The tt-cli golden set (firmware 19.17.1) is untested.
+    - Built on tenstorrent/tt-metal de59f8a (v0.76.0 + 1) with modified ttnn C++ (matmul, sparse_matmul,
+      chunk_gated_delta_rule, gated_delta_attn), not on the tt-metal of the current golden set.
+    - The weights paths are pinned under `HF_HOME` (`/hf/hub/...` in the container): keep `HF_HUB_CACHE` at its
+      default (`$HF_HOME/hub`).
+  licensing: >-
+    Weights: Apache-2.0, derived from Qwen/Qwen3.6-35B-A3B (Apache-2.0); see the release repo's LICENSE.  The
+    TTNN runtime and serving code in `code/`, the vLLM fork and the plugin are Apache-2.0.
+  license:
+    id: apache-2.0
+  pipeline_tag: text-generation
+  base_model: [Qwen/Qwen3.6-35B-A3B]
